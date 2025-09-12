@@ -1,0 +1,50 @@
+name: Deploy Pages (vendorized)
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 把 React / ReactDOM / Babel 下載到本地 vendor/ 資料夾
+      - name: Vendor JS libs
+        run: |
+          mkdir -p vendor
+          curl -L -o vendor/react.production.min.js https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js
+          curl -L -o vendor/react-dom.production.min.js https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js
+          curl -L -o vendor/babel.min.js https://cdn.jsdelivr.net/npm/babel-standalone@6/babel.min.js
+          ls -lh vendor
+
+      # 把整個專案（含 vendor/）打成 artifact 給 Pages
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: .
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      pages: write
+      id-token: write
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
