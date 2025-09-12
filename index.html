@@ -59,7 +59,11 @@
         '</div>';
     }
   </script>
-
+  
+<script src="./vendor/react.production.min.js"></script>
+<script src="./vendor/react-dom.production.min.js"></script>
+<script src="./vendor/babel.min.js"></script>
+  
   <script type="text/babel">
     const { useState, useEffect, useMemo, useRef } = React;
     const ab2b64 = (buffer) => { const bytes = new Uint8Array(buffer); let binary = ""; for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]); return btoa(binary); };
