@@ -12,53 +12,6 @@
 </head>
 <body class="bg-pink-50">
   <div id="root"></div>
-  <script>
-    function loadScript(urls, cb){
-      let i=0;
-      (function tryNext(){
-        if(i>=urls.length){ cb(new Error('all failed')); return; }
-        var s=document.createElement('script');
-        s.src=urls[i++];
-        s.async=false;
-        s.onload=function(){ cb(); };
-        s.onerror=function(){ setTimeout(tryNext, 50); };
-        document.head.appendChild(s);
-      })();
-    }
-    const reactURLs=[
-      "https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js",
-      "https://unpkg.com/react@18/umd/react.production.min.js",
-      "https://fastly.jsdelivr.net/npm/react@18/umd/react.production.min.js"
-    ];
-    const rdomURLs=[
-      "https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js",
-      "https://unpkg.com/react-dom@18/umd/react-dom.production.min.js",
-      "https://fastly.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js"
-    ];
-    const babelURLs=[
-      "https://cdn.jsdelivr.net/npm/babel-standalone@6/babel.min.js",
-      "https://unpkg.com/babel-standalone@6/babel.min.js",
-      "https://fastly.jsdelivr.net/npm/babel-standalone@6/babel.min.js"
-    ];
-    loadScript(reactURLs, function(err){
-      if(err) return fail();
-      loadScript(rdomURLs, function(err2){
-        if(err2) return fail();
-        loadScript(babelURLs, function(err3){
-          if(err3) return fail();
-        });
-      });
-    });
-    function fail(){
-      document.body.innerHTML =
-        '<div style="padding:24px;font-family:system-ui;line-height:1.7">' +
-        '外部程式庫載入失敗（可能被網路或內容阻擋）。<br>' +
-        '請改用完整網址 <b>https://lia-liao617.github.io/mina.github.io/</b>、' +
-        '換個網路 / 關閉內容阻擋 / 用無痕模式再試。<br>' +
-        '若仍無法，我可提供離線版（把程式庫放到你的 repo），回覆我即可。' +
-        '</div>';
-    }
-  </script>
   
 <script src="./vendor/react.production.min.js"></script>
 <script src="./vendor/react-dom.production.min.js"></script>
