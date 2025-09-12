@@ -1,0 +1,1 @@
+把 index.html 上傳到 GitHub Repo 根目錄；Pages 設為 main / (root)。網址：https://<帳號>.github.io/<repo>/
