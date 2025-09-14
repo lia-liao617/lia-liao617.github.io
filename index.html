@@ -1,497 +1,246 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>心情日記（本機加密）</title>
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='48' fill='%23f472b6'/%3E%3Ctext x='50' y='58' text-anchor='middle' font-size='54' font-family='Arial' fill='white'%3E%E2%9D%A4%EF%B8%8F%3C/text%3E%3C/svg%3E" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>html,body,#root{height:100%}</style>
+</head>
+<body class="bg-pink-50">
+  <div id="root"></div>
 
-// ---------------------------------------------
-// 心情日記：單頁 Web App（本機儲存＋密碼加密）
-// 功能：月曆、文字、照片、可愛貼圖、今日待辦
-// 新增（本次）：
-// 1) 待辦「拖拉排序」
-// 2) 逾期/跨日提醒（可一鍵帶到今天，並可同時把原任務標記完成）
-// 3) 每日重複「模板」：可編輯模板並一鍵套用到今天
-// 4) 今日完成率「小圓餅圖」
-// 5) 自訂貼圖庫：可上傳更多貼圖，在日記視窗直接使用
-// ---------------------------------------------
+  <!-- React / ReactDOM / Babel（CDN 版） -->
+  <script src="https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone/babel.min.js"></script>
 
-// 工具：Base64 <-> ArrayBuffer
-const ab2b64 = (buffer) => {
-  const bytes = new Uint8Array(buffer);
-  let binary = "";
-  for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
-  return btoa(binary);
-};
-const b642ab = (b64) => {
-  const binary = atob(b64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return bytes.buffer;
-};
+  <script type="text/babel" data-presets="env,react">
+    const { useState, useEffect, useMemo, useRef } = React;
 
-// 工具：WebCrypto - 衍生金鑰與加解密
-const textEncoder = new TextEncoder();
-const textDecoder = new TextDecoder();
+    // ---- 工具＆加密 ----
+    const ab2b64 = (buffer) => { const bytes = new Uint8Array(buffer); let binary=""; for(let i=0;i<bytes.byteLength;i++) binary+=String.fromCharCode(bytes[i]); return btoa(binary); };
+    const b642ab = (b64) => { const binary = atob(b64); const bytes = new Uint8Array(binary.length); for (let i=0;i<binary.length;i++) bytes[i]=binary.charCodeAt(i); return bytes.buffer; };
+    const textEncoder = new TextEncoder(); const textDecoder = new TextDecoder();
+    async function deriveKey(password, saltB64){ const salt = saltB64 ? new Uint8Array(b642ab(saltB64)) : crypto.getRandomValues(new Uint8Array(16)); const baseKey = await crypto.subtle.importKey("raw", textEncoder.encode(password), "PBKDF2", false, ["deriveKey"]); const aesKey = await crypto.subtle.deriveKey({ name: "PBKDF2", salt, iterations: 250000, hash: "SHA-256" }, baseKey, { name: "AES-GCM", length: 256 }, false, ["encrypt","decrypt"]); return { key:aesKey, saltB64: ab2b64(salt)};}
+    async function encryptJSON(obj, key){ const iv = crypto.getRandomValues(new Uint8Array(12)); const plaintext = textEncoder.encode(JSON.stringify(obj)); const ciphertext = await crypto.subtle.encrypt({ name:"AES-GCM", iv }, key, plaintext); return { iv:ab2b64(iv), data:ab2b64(ciphertext) };}
+    async function decryptJSON(payload, key){ const {iv,data} = payload; const ivArr = new Uint8Array(b642ab(iv)); const cipherAB = b642ab(data); const plaintextAB = await crypto.subtle.decrypt({ name:"AES-GCM", iv:ivArr }, key, cipherAB); const plaintext = textDecoder.decode(plaintextAB); return JSON.parse(plaintext);}
 
-async function deriveKey(password, saltB64) {
-  const salt = saltB64 ? new Uint8Array(b642ab(saltB64)) : crypto.getRandomValues(new Uint8Array(16));
-  const baseKey = await crypto.subtle.importKey(
-    "raw",
-    textEncoder.encode(password),
-    "PBKDF2",
-    false,
-    ["deriveKey"]
-  );
-  const aesKey = await crypto.subtle.deriveKey(
-    { name: "PBKDF2", salt, iterations: 250_000, hash: "SHA-256" },
-    baseKey,
-    { name: "AES-GCM", length: 256 },
-    false,
-    ["encrypt", "decrypt"]
-  );
-  return { key: aesKey, saltB64: ab2b64(salt) };
-}
+    // ---- 常數/日期/小工具 ----
+    const LS_PREFIX="moodDiary_", LS_SALT=LS_PREFIX+"salt", LS_VERIFIER=LS_PREFIX+"verifier", LS_TEMPLATES=LS_PREFIX+"templates", LS_CSTICKERS=LS_PREFIX+"cstickers";
+    function toDateStr(d){ const y=d.getFullYear(); const m=String(d.getMonth()+1).padStart(2,"0"); const day=String(d.getDate()).padStart(2,"0"); return `${y}-${m}-${day}`; }
+    function getMonthMatrix(y,m){ const first=new Date(y,m,1); const firstDay=first.getDay(); const daysInMonth=new Date(y,m+1,0).getDate(); const cells=[]; for(let i=0;i<firstDay;i++) cells.push(null); for(let d=1; d<=daysInMonth; d++) cells.push(new Date(y,m,d)); while(cells.length%7!==0) cells.push(null); while(cells.length<42) cells.push(null); return cells; }
+    async function fileToDataURLCompressed(file){ return new Promise((resolve,reject)=>{ const reader=new FileReader(); reader.onload=()=>{ const img=new Image(); img.onload=()=>{ const canvas=document.createElement("canvas"); let {width,height}=img; const max=1600; if(width>height && width>max){ height=Math.round((height*max)/width); width=max; } else if(height>max){ width=Math.round((width*max)/height); height=max; } canvas.width=width; canvas.height=height; const ctx=canvas.getContext("2d"); ctx.drawImage(img,0,0,width,height); const isPng=file.type.includes("png"); const dataUrl=canvas.toDataURL(isPng?"image/png":"image/jpeg", isPng?0.92:0.85); resolve(dataUrl); }; img.onerror=reject; img.src=reader.result; }; reader.onerror=reject; reader.readAsDataURL(file); }); }
+    const STICKERS=["🐻","🐰","🐱","🌸","🍓","✨","💖","🍰","⭐","😻","🍀","🌈","🎀","🐥","🧸","☁️","🌼"];
+    const reorderByIds=(list,fromId,toId)=>{ const a=list.findIndex(x=>x.id===fromId); const b=list.findIndex(x=>x.id===toId); if(a===-1||b===-1||a===b) return list; const copy=[...list]; const [item]=copy.splice(a,1); copy.splice(b,0,item); return copy; };
 
-async function encryptJSON(obj, key) {
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const plaintext = textEncoder.encode(JSON.stringify(obj));
-  const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, plaintext);
-  return { iv: ab2b64(iv), data: ab2b64(ciphertext) };
-}
+    // ---- 表單：設定/解鎖 ----
+    function SetPasswordForm({ onSet }){ const [p1,setP1]=useState(""), [p2,setP2]=useState(""), [show,setShow]=useState(false);
+      const submit=async(e)=>{ e.preventDefault(); if(p1.length<6) return alert("請至少 6 碼密碼"); if(p1!==p2) return alert("兩次輸入不一致"); await onSet(p1); };
+      return (<form onSubmit={submit} className="space-y-4"><div><label className="text-sm text-gray-600">設定密碼</label><input type={show?"text":"password"} className="mt-1 w-full border rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-300" value={p1} onChange={(e)=>setP1(e.target.value)} placeholder="至少 6 碼"/></div><div><label className="text-sm text-gray-600">再次輸入密碼</label><input type={show?"text":"password"} className="mt-1 w-full border rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-300" value={p2} onChange={(e)=>setP2(e.target.value)}/></div><div className="flex items-center gap-2 text-sm"><input id="showPwd" type="checkbox" checked={show} onChange={(e)=>setShow(e.target.checked)} /><label htmlFor="showPwd">顯示密碼</label></div><button className="w-full bg-pink-500 hover:bg-pink-600 text-white rounded-xl py-2 font-semibold">設定並進入</button></form>); }
+    function UnlockForm({ onUnlock }){ const [pwd,setPwd]=useState(""), [show,setShow]=useState(false); const submit=async(e)=>{ e.preventDefault(); await onUnlock(pwd); }; return (<form onSubmit={submit} className="space-y-4"><div><label className="text-sm text-gray-600">輸入密碼</label><input type={show?"text":"password"} className="mt-1 w-full border rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-purple-300" value={pwd} onChange={(e)=>setPwd(e.target.value)} /></div><div className="flex items-center gap-2 text-sm"><input id="showPwd2" type="checkbox" checked={show} onChange={(e)=>setShow(e.target.checked)} /><label htmlFor="showPwd2">顯示密碼</label></div><button className="w-full bg-purple-500 hover:bg-purple-600 text-white rounded-xl py-2 font-semibold">解鎖</button></form>); }
 
-async function decryptJSON(payload, key) {
-  const { iv, data } = payload;
-  const ivArr = new Uint8Array(b642ab(iv));
-  const cipherAB = b642ab(data);
-  const plaintextAB = await crypto.subtle.decrypt({ name: "AES-GCM", iv: ivArr }, key, cipherAB);
-  const plaintext = textDecoder.decode(plaintextAB);
-  return JSON.parse(plaintext);
-}
-
-// 儲存 Key 前綴
-const LS_PREFIX = "moodDiary_";
-const LS_SALT = `${LS_PREFIX}salt`;
-const LS_VERIFIER = `${LS_PREFIX}verifier`;
-const LS_TEMPLATES = `${LS_PREFIX}templates`;
-const LS_CSTICKERS = `${LS_PREFIX}cstickers`;
-
-// 日期工具
-function toDateStr(d) {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
-
-function getMonthMatrix(year, month /* 0~11 */) {
-  const first = new Date(year, month, 1);
-  const firstDay = first.getDay(); // 0(日)~6(六)
-  const daysInMonth = new Date(year, month + 1, 0).getDate();
-
-  const cells = [];
-  for (let i = 0; i < firstDay; i++) cells.push(null); // 前置空白
-  for (let d = 1; d <= daysInMonth; d++) cells.push(new Date(year, month, d)); // 本月
-  while (cells.length % 7 !== 0) cells.push(null); // 填滿 6x7
-  while (cells.length < 42) cells.push(null);
-  return cells;
-}
-
-// 壓縮上傳圖片（寬/高最大 1600px），保留 PNG 透明
-async function fileToDataURLCompressed(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const img = new Image();
-      img.onload = () => {
-        const canvas = document.createElement("canvas");
-        let { width, height } = img;
-        const max = 1600;
-        if (width > height && width > max) {
-          height = Math.round((height * max) / width);
-          width = max;
-        } else if (height > max) {
-          width = Math.round((width * max) / height);
-          height = max;
-        }
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext("2d");
-        ctx.drawImage(img, 0, 0, width, height);
-        const isPng = file.type.includes("png");
-        const dataUrl = canvas.toDataURL(isPng ? "image/png" : "image/jpeg", isPng ? 0.92 : 0.85);
-        resolve(dataUrl);
-      };
-      img.onerror = reject;
-      img.src = reader.result;
-    };
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
-}
-
-// 預設貼圖（可愛 emoji）
-const STICKERS = ["🐻", "🐰", "🐱", "🌸", "🍓", "✨", "💖", "🧋", "🍰", "⭐", "🫶", "😻", "🍀", "🌈", "🎀", "🐥", "🧸", "☁️", "🌼"];
-
-// 小工具
-const reorderByIds = (list, fromId, toId) => {
-  const a = list.findIndex((x) => x.id === fromId);
-  const b = list.findIndex((x) => x.id === toId);
-  if (a === -1 || b === -1 || a === b) return list;
-  const copy = [...list];
-  const [item] = copy.splice(a, 1);
-  copy.splice(b, 0, item);
-  return copy;
-};
-
-// 主要元件
-export default function App() {
-  const [unlocked, setUnlocked] = useState(false);
-  const [cryptoKey, setCryptoKey] = useState(null);
-  const [monthDate, setMonthDate] = useState(new Date());
-  const [selectedDate, setSelectedDate] = useState(null);
-  const [hasVerifier, setHasVerifier] = useState(false);
-
-  useEffect(() => {
-    setHasVerifier(Boolean(localStorage.getItem(LS_SALT) && localStorage.getItem(LS_VERIFIER)));
-  }, []);
-
-  const handleSetPassword = async (pwd) => {
-    const { key, saltB64 } = await deriveKey(pwd, null);
-    const verifierPayload = await encryptJSON({ v: "ok" }, key);
-    localStorage.setItem(LS_SALT, saltB64);
-    localStorage.setItem(LS_VERIFIER, JSON.stringify(verifierPayload));
-    setHasVerifier(true);
-    setCryptoKey(key);
-    setUnlocked(true);
-  };
-
-  const handleUnlock = async (pwd) => {
-    try {
-      const saltB64 = localStorage.getItem(LS_SALT);
-      const { key } = await deriveKey(pwd, saltB64);
-      const verifierPayload = JSON.parse(localStorage.getItem(LS_VERIFIER));
-      const res = await decryptJSON(verifierPayload, key);
-      if (res?.v === "ok") {
-        setCryptoKey(key);
-        setUnlocked(true);
-      } else {
-        alert("密碼錯誤");
-      }
-    } catch (e) {
-      console.error(e);
-      alert("密碼錯誤或資料已損毀。");
-    }
-  };
-
-  const logout = () => {
-    setUnlocked(false);
-    setCryptoKey(null);
-  };
-
-  const resetAll = () => {
-    if (!confirm("⚠️ 將清空所有日記資料與密碼設定，且無法復原。確定嗎？")) return;
-    Object.keys(localStorage)
-      .filter((k) => k.startsWith(LS_PREFIX))
-      .forEach((k) => localStorage.removeItem(k));
-    setUnlocked(false);
-    setCryptoKey(null);
-    setHasVerifier(false);
-    alert("已清空。重新整理後可重新設定密碼。");
-  };
-
-  if (!unlocked) {
-    return (
-      <div className="min-h-screen bg-gradient-to-b from-pink-50 to-purple-50 flex items-center justify-center p-6">
-        <div className="w-full max-w-md bg-white/80 backdrop-blur shadow-xl rounded-2xl p-6">
-          <div className="text-center mb-6">
-            <div className="text-3xl font-bold">心情日記</div>
-            <div className="text-sm text-gray-500 mt-1">本機加密儲存 · 私密保護</div>
-          </div>
-          {hasVerifier ? (
-            <UnlockForm onUnlock={handleUnlock} />
-          ) : (
-            <SetPasswordForm onSet={handleSetPassword} />
-          )}
-          <div className="mt-6 text-xs text-gray-500 leading-relaxed">
-            <p>提示：此應用將內容加密後存於你的瀏覽器 <code>localStorage</code>。換電腦/清除瀏覽器資料會遺失內容，建議定期「備份」。</p>
-            <p className="mt-1">忘記密碼無法復原，請妥善保管。</p>
+    // ---- 今天待辦卡片 & 逾期卡 ----
+    function TodayTasksCard({ dateStr, tasks, newTaskText, setNewTaskText, addTask, toggleTask, updateTaskText, removeTask, reorderTasks, openToday }) {
+      const hasTasks = tasks && tasks.length > 0; const done = tasks.filter((t) => t.done).length; const total = tasks.length; const pct = total ? Math.round((done * 100) / total) : 0;
+      const [dragId, setDragId] = useState(null);
+      return (<div className={"rounded-2xl shadow "+ (hasTasks?"bg-white/90":"bg-white/70") +" p-4 sm:p-6"}>
+        <div className="flex items-center justify-between mb-3">
+          <div><div className="text-sm text-gray-500">今天 {dateStr}</div><div className="text-lg font-semibold">今天的待辦</div></div>
+          <div className="flex items-center gap-3">
+            <div className="relative w-10 h-10 rounded-full" style={{ background: `conic-gradient(#ec4899 ${pct}%, #e5e7eb 0)` }}><div className="absolute inset-1 rounded-full bg-white flex items-center justify-center text-xs text-gray-600">{done}/{total}</div></div>
+            <button onClick={openToday} className="px-3 py-1.5 rounded-lg bg-pink-500 text-white text-sm hover:bg-pink-600">編輯今天日記</button>
           </div>
         </div>
-      </div>
-    );
-  }
-
-  return (
-    <DiaryApp
-      monthDate={monthDate}
-      setMonthDate={setMonthDate}
-      selectedDate={selectedDate}
-      setSelectedDate={setSelectedDate}
-      cryptoKey={cryptoKey}
-      logout={logout}
-      resetAll={resetAll}
-    />
-  );
-}
-
-function SetPasswordForm({ onSet }) {
-  const [p1, setP1] = useState("");
-  const [p2, setP2] = useState("");
-  const [show, setShow] = useState(false);
-  const submit = async (e) => {
-    e.preventDefault();
-    if (p1.length < 6) {
-      alert("請至少 6 碼密碼");
-      return;
+        <div className="flex items-center gap-2 mb-3"><input value={newTaskText} onChange={(e) => setNewTaskText(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') addTask(); }} placeholder={hasTasks ? "新增待辦..." : "寫下今天要做的事（Enter 新增）"} className="flex-1 border rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-300" /><button onClick={addTask} className="px-3 py-2 rounded-xl bg-gray-800 text-white text-sm">新增</button></div>
+        {hasTasks ? (<ul className="space-y-2">{tasks.map((t) => (<li key={t.id} className="flex items-center gap-2 p-2 rounded-lg border bg-white" draggable onDragStart={() => setDragId(t.id)} onDragOver={(e) => e.preventDefault()} onDrop={() => { if (dragId && dragId !== t.id) reorderTasks(dragId, t.id); setDragId(null); }}><span className="cursor-grab select-none px-1 text-gray-400">⋮⋮</span><input type="checkbox" checked={!!t.done} onChange={() => toggleTask(t.id)} className="w-5 h-5" /><input className={"flex-1 bg-transparent focus:outline-none " + (t.done ? "line-through text-gray-400" : "")} value={t.text} onChange={(e) => updateTaskText(t.id, e.target.value)} /><button onClick={() => removeTask(t.id)} className="text-xs text-red-600 hover:underline">刪除</button></li>))}</ul>) : (<div className="text-sm text-gray-500">今天還沒有待辦，先寫一個吧！</div>)}
+      </div>);
     }
-    if (p1 !== p2) {
-      alert("兩次輸入不一致");
-      return;
+    function OverdueCard({ overdue, carryOne, carryAll }){ if(!overdue?.length) return null; return (<div className="rounded-2xl shadow bg-white p-4 sm:p-6 mt-4"><div className="flex items-center justify-between mb-2"><div className="text-lg font-semibold">跨日提醒（最近 7 天未完成）</div><div className="flex items-center gap-2 text-sm"><button onClick={() => carryAll(true)} className="px-3 py-1.5 rounded-lg bg-emerald-500 text-white hover:bg-emerald-600">全部帶到今天並標記原任務完成</button><button onClick={() => carryAll(false)} className="px-3 py-1.5 rounded-lg bg-gray-200 hover:bg-gray-300">全部帶到今天（不標記完成）</button></div></div><ul className="space-y-2">{overdue.map((it,i)=>(<li key={i} className="flex items-center justify-between p-2 rounded-lg border bg-white"><div className="text-sm"><span className="text-gray-500 mr-2">{it.dateStr}</span>{it.text}</div><div className="flex items-center gap-2 text-xs"><button onClick={() => carryOne(it, true)} className="px-2 py-1 rounded bg-emerald-100 text-emerald-800 hover:bg-emerald-200">帶到今天+完成原任務</button><button onClick={() => carryOne(it, false)} className="px-2 py-1 rounded bg-gray-100 hover:bg-gray-200">只帶到今天</button></div></li>))}</ul></div>); }
+
+    // ---- 月曆 ----
+    function CalendarGrid({ cells, entryMap, todayStr, onPick }) {
+      const weekdays=["日","一","二","三","四","五","六"];
+      return (<div><div className="grid grid-cols-7 text-center text-sm text-gray-500 mb-2">{weekdays.map((w)=>(<div key={w} className="py-1">{w}</div>))}</div><div className="grid grid-cols-7 gap-1 sm:gap-2">{cells.map((d,idx)=>{ if(!d) return <div key={idx} className="aspect-square rounded-xl bg-transparent" />; const dateStr=toDateStr(d); const isToday=dateStr===todayStr; const has=entryMap.has(d.getDate()); return (<button key={idx} onClick={()=>onPick(d)} className={"aspect-square rounded-xl p-2 text-left border hover:shadow transition "+(isToday?"border-pink-400 bg-pink-50":"border-gray-200 bg-white")} title={has?"有日記/待辦":""}><div className="flex items-center justify-between"><div className="text-sm font-semibold">{d.getDate()}</div>{has && <span className="inline-block w-2 h-2 rounded-full bg-pink-500" />}</div></button>); })}</div></div>);
     }
-    await onSet(p1);
-  };
-  return (
-    <form onSubmit={submit} className="space-y-4">
-      <div>
-        <label className="text-sm text-gray-600">設定密碼</label>
-        <input type={show ? "text" : "password"} className="mt-1 w-full border rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-300" value={p1} onChange={(e) => setP1(e.target.value)} placeholder="至少 6 碼" />
-      </div>
-      <div>
-        <label className="text-sm text-gray-600">再次輸入密碼</label>
-        <input type={show ? "text" : "password"} className="mt-1 w-full border rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-300" value={p2} onChange={(e) => setP2(e.target.value)} />
-      </div>
-      <div className="flex items-center gap-2 text-sm">
-        <input id="showPwd" type="checkbox" checked={show} onChange={(e) => setShow(e.target.checked)} />
-        <label htmlFor="showPwd">顯示密碼</label>
-      </div>
-      <button className="w-full bg-pink-500 hover:bg-pink-600 text-white rounded-xl py-2 font-semibold">設定並進入</button>
-    </form>
-  );
-}
 
-function UnlockForm({ onUnlock }) {
-  const [pwd, setPwd] = useState("");
-  const [show, setShow] = useState(false);
-  const submit = async (e) => {
-    e.preventDefault();
-    await onUnlock(pwd);
-  };
-  return (
-    <form onSubmit={submit} className="space-y-4">
-      <div>
-        <label className="text-sm text-gray-600">輸入密碼</label>
-        <input type={show ? "text" : "password"} className="mt-1 w-full border rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-purple-300" value={pwd} onChange={(e) => setPwd(e.target.value)} />
-      </div>
-      <div className="flex items-center gap-2 text-sm">
-        <input id="showPwd2" type="checkbox" checked={show} onChange={(e) => setShow(e.target.checked)} />
-        <label htmlFor="showPwd2">顯示密碼</label>
-      </div>
-      <button className="w-full bg-purple-500 hover:bg-purple-600 text-white rounded-xl py-2 font-semibold">解鎖</button>
-    </form>
-  );
-}
-
-function DiaryApp({ monthDate, setMonthDate, selectedDate, setSelectedDate, cryptoKey, logout, resetAll }) {
-  const year = monthDate.getFullYear();
-  const month = monthDate.getMonth();
-  const cells = useMemo(() => getMonthMatrix(year, month), [year, month]);
-
-  const [refreshKey, setRefreshKey] = useState(0);
-
-  // 當月哪些日期有資料
-  const entryMap = useMemo(() => {
-    const map = new Set();
-    const daysInMonth = new Date(year, month + 1, 0).getDate();
-    for (let d = 1; d <= daysInMonth; d++) {
-      const k = `${LS_PREFIX}${year}-${String(month + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
-      if (localStorage.getItem(k)) map.add(d);
+    // ---- 日記視窗（含照片/貼圖/當日事項）----
+    function EntryModal({ date, onClose, onChanged, cryptoKey, readCustomStickers, writeCustomStickers }){
+      const dateStr=toDateStr(date);
+      const [text,setText]=useState(""), [images,setImages]=useState([]), [stickers,setStickers]=useState([]), [tasks,setTasks]=useState([]), [loading,setLoading]=useState(true), [saving,setSaving]=useState(false), [newTask,setNewTask]=useState(""), [libStickers,setLibStickers]=useState([]);
+      useEffect(()=>{ (async()=>{ try{ const raw=localStorage.getItem(`${LS_PREFIX}${dateStr}`); if(raw){ const payload=JSON.parse(raw); const obj=await decryptJSON(payload, cryptoKey); setText(obj.text||""); setImages(Array.isArray(obj.images)?obj.images:[]); const st=Array.isArray(obj.stickers)?obj.stickers:[]; setStickers(st); setTasks(Array.isArray(obj.tasks)?obj.tasks:[]); } if(readCustomStickers) setLibStickers(await readCustomStickers()); }catch(e){ console.error(e); alert("讀取資料失敗，可能是密碼變更或資料損毀。"); } finally{ setLoading(false); } })(); }, [dateStr, cryptoKey]);
+      const onAddImages=async(files)=>{ const list=Array.from(files||[]); const converted=[]; for(const f of list) converted.push(await fileToDataURLCompressed(f)); setImages((prev)=>[...converted, ...prev]); };
+      const onSave=async()=>{ try{ setSaving(true); const payload=await encryptJSON({ text, images, stickers, tasks, lastModified:Date.now() }, cryptoKey); localStorage.setItem(`${LS_PREFIX}${dateStr}`, JSON.stringify(payload)); onClose(); onChanged&&onChanged(); }catch(e){ console.error(e); alert("儲存失敗"); } finally{ setSaving(false);} };
+      const onDelete=()=>{ if(!confirm("刪除此日期的日記與圖片/待辦？")) return; localStorage.removeItem(`${LS_PREFIX}${dateStr}`); onClose(); onChanged&&onChanged(); };
+      const addStickerEmoji=(s)=>setStickers((prev)=>[s, ...prev]);
+      const removeImage=(idx)=>setImages((prev)=>prev.filter((_,i)=>i!==idx));
+      const removeSticker=(idx)=>setStickers((prev)=>prev.filter((_,i)=>i!==idx));
+      const [dragId,setDragId]=useState(null);
+      const addTask=()=>{ const t=newTask.trim(); if(!t) return; setTasks((prev)=>[{ id:Date.now()+Math.random(), text:t, done:false }, ...prev]); setNewTask(""); };
+      const toggleTask=(id)=>setTasks((prev)=>prev.map((x)=> (x.id===id?{...x, done:!x.done}:x)));
+      const updateTaskText=(id,text)=>setTasks((prev)=>prev.map((x)=> (x.id===id?{...x, text}:x)));
+      const removeTask=(id)=>setTasks((prev)=>prev.filter((x)=>x.id!==id));
+      const reorderTaskLocal=(from,to)=>setTasks((prev)=>reorderByIds(prev, from, to));
+      const onUploadStickers=async(files)=>{ const list=Array.from(files||[]); const converted=[]; for(const f of list) converted.push(await fileToDataURLCompressed(f)); const newLib=[...converted, ...libStickers]; setLibStickers(newLib); if(writeCustomStickers) await writeCustomStickers(newLib); };
+      const deleteLibSticker=async(idx)=>{ const newLib=libStickers.filter((_,i)=>i!==idx); setLibStickers(newLib); if(writeCustomStickers) await writeCustomStickers(newLib); };
+      const useLibSticker=(src)=>setStickers((prev)=>[src, ...prev]);
+      const renderStickerItem=(s,i)=>{ const isImg=typeof s==='string' && s.startsWith('data:image'); return (<div key={i} className="relative">{isImg?(<img src={s} alt="sticker" className="w-12 h-12 object-contain" />):(<span className="text-3xl leading-none">{s}</span>)}<button onClick={()=>removeSticker(i)} className="absolute -top-2 -right-2 bg-black/60 text-white text-xs rounded-full px-1">✕</button></div>); };
+      return (<div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-end sm:items-center justify-center z-50"><div className="w-full sm:max-w-3xl bg-white rounded-t-2xl sm:rounded-2xl shadow-xl max-h-[90svh] sm:max-h-[90vh] overflow-hidden flex flex-col"><div className="flex items-center justify-between px-4 sm:px-6 py-3 border-b shrink-0"><div className="font-semibold">{toDateStr(date)} 的心情</div><button onClick={onClose} className="text-gray-500 hover:text-gray-700">✕</button></div><div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-6">{loading?(<div className="text-center text-gray-500">載入中…</div>):(<><section><label className="text-sm text-gray-600">文字內容</label><textarea value={text} onChange={(e)=>setText(e.target.value)} rows={6} className="mt-1 w-full border rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-300" placeholder="今天的心情⋯⋯"/></section><section className="space-y-2"><div className="flex items-center justify-between"><div className="text-sm text-gray-600">照片</div><label className="px-3 py-1.5 rounded-lg bg-gray-100 text-sm cursor-pointer hover:bg-gray-200">新增照片<input type="file" accept="image/*" multiple className="hidden" onChange={(e)=>onAddImages(e.target.files)} /></label></div>{images.length===0?(<div className="text-xs text-gray-400">尚未加入照片</div>):(<div className="grid grid-cols-3 sm:grid-cols-4 gap-2">{images.map((src,idx)=>(<div key={idx} className="relative group"><img src={src} alt="uploaded" className="w-full h-24 object-cover rounded-lg border" /><button onClick={()=>removeImage(idx)} className="absolute top-1 right-1 bg-black/60 text-white text-xs px-1.5 py-0.5 rounded opacity-0 group-hover:opacity-100">刪除</button></div>))}</div>)}</section><section className="space-y-3"><div className="text-sm text-gray-600">可愛貼圖</div><div className="flex flex-wrap gap-2">{STICKERS.map((s)=>(<button key={s} onClick={()=>addStickerEmoji(s)} className="text-2xl hover:scale-110 transition">{s}</button>))}</div><div className="mt-2"><div className="flex items-center justify-between mb-2"><div className="text-sm text-gray-600">自訂貼圖庫（點擊可插入）</div><label className="px-3 py-1.5 rounded-lg bg-gray-100 text-sm cursor-pointer hover:bg-gray-200">上傳貼圖<input type="file" accept="image/*" multiple className="hidden" onChange={async(e)=>e.target.files?.length && (await onUploadStickers(e.target.files))} /></label></div>{libStickers.length?(<div className="grid grid-cols-6 sm:grid-cols-8 gap-2">{libStickers.map((src,idx)=>(<div key={idx} className="relative group"><img src={src} alt="sticker" className="w-12 h-12 object-contain border rounded-lg bg-white cursor-pointer" onClick={()=>useLibSticker(src)} /><button onClick={()=>deleteLibSticker(idx)} className="absolute -top-2 -right-2 bg-black/60 text-white text-[10px] rounded-full px-1 opacity-0 group-hover:opacity-100">✕</button></div>))}</div>):(<div className="text-xs text-gray-400">尚無自訂貼圖，先上傳 PNG/JPG 試試！</div>)}</div>{stickers.length>0 && (<div className="flex flex-wrap gap-2 mt-2">{stickers.map((s,i)=>renderStickerItem(s,i))}</div>)}</section><section className="space-y-2"><div className="text-sm text-gray-600">當日事項（可打勾，拖拉排序）</div><div className="flex items-center gap-2"><input value={newTask} onChange={(e)=>setNewTask(e.target.value)} onKeyDown={(e)=>{ if(e.key==='Enter') addTask(); }} placeholder="輸入待辦，Enter 新增" className="flex-1 border rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-300" /><button onClick={addTask} className="px-3 py-2 rounded-xl bg-gray-800 text-white text-sm">新增</button></div>{tasks.length>0?(<ul className="space-y-2">{tasks.map((t)=>(<li key={t.id} className="flex items-center gap-2 p-2 rounded-lg border bg-white" draggable onDragStart={()=>setDragId(t.id)} onDragOver={(e)=>e.preventDefault()} onDrop={()=>{ if(dragId && dragId!==t.id) reorderTaskLocal(dragId, t.id); setDragId(null); }}><span className="cursor-grab select-none px-1 text-gray-400">⋮⋮</span><input type="checkbox" checked={!!t.done} onChange={()=>toggleTask(t.id)} className="w-5 h-5" /><input className={"flex-1 bg-transparent focus:outline-none "+(t.done?"line-through text-gray-400":"")} value={t.text} onChange={(e)=>updateTaskText(t.id, e.target.value)} /><button onClick={()=>removeTask(t.id)} className="text-xs text-red-600 hover:underline">刪除</button></li>))}</ul>):(<div className="text-xs text-gray-400">還沒有事項，先加一個吧！</div>)}</section></>)}</div><div className="flex items-center justify-between px-4 sm:px-6 py-3 border-t bg-white/95 backdrop-blur sticky bottom-0 shrink-0"><button onClick={onDelete} className="px-3 py-2 rounded-xl bg-red-100 text-red-700 hover:bg-red-200">刪除此日</button><div className="flex items-center gap-2"><button onClick={onClose} className="px-3 py-2 rounded-xl bg-gray-100 hover:bg-gray-200">取消</button><button onClick={onSave} disabled={saving} className="px-4 py-2 rounded-xl bg-pink-500 text-white hover:bg-pink-600 disabled:opacity-60">{saving?"儲存中…":"儲存"}</button></div></div></div></div>);
     }
-    return map;
-  }, [year, month, selectedDate, refreshKey]);
 
-  const today = new Date();
-  const todayStr = toDateStr(today);
-
-  // 讀寫每日條目
-  const readEntry = async (dateStr) => {
-    const raw = localStorage.getItem(`${LS_PREFIX}${dateStr}`);
-    if (!raw) return null;
-    const payload = JSON.parse(raw);
-    const obj = await decryptJSON(payload, cryptoKey);
-    if (!Array.isArray(obj.tasks)) obj.tasks = [];
-    if (!Array.isArray(obj.images)) obj.images = [];
-    if (!Array.isArray(obj.stickers)) obj.stickers = [];
-    return obj;
-  };
-  const writeEntry = async (dateStr, obj) => {
-    const payload = await encryptJSON(obj, cryptoKey);
-    localStorage.setItem(`${LS_PREFIX}${dateStr}`, JSON.stringify(payload));
-    setRefreshKey((v) => v + 1);
-  };
-
-  // 讀寫模板（加密）
-  const readTemplates = async () => {
-    const raw = localStorage.getItem(LS_TEMPLATES);
-    if (!raw) return [];
-    const payload = JSON.parse(raw);
-    try { return await decryptJSON(payload, cryptoKey); } catch { return []; }
-  };
-  const writeTemplates = async (arr) => {
-    const payload = await encryptJSON(arr, cryptoKey);
-    localStorage.setItem(LS_TEMPLATES, JSON.stringify(payload));
-  };
-
-  // 讀寫自訂貼圖庫（加密）
-  const readCustomStickers = async () => {
-    const raw = localStorage.getItem(LS_CSTICKERS);
-    if (!raw) return [];
-    const payload = JSON.parse(raw);
-    try { return await decryptJSON(payload, cryptoKey); } catch { return []; }
-  };
-  const writeCustomStickers = async (arr) => {
-    const payload = await encryptJSON(arr, cryptoKey);
-    localStorage.setItem(LS_CSTICKERS, JSON.stringify(payload));
-  };
-
-  // iOS / 內建瀏覽器提示與匯入 ref
-  const importRef = useRef(null);
-  const inApp = /FBAN|FBAV|Instagram|Line\//i.test(navigator.userAgent || "");
-  const isStandalone = (window?.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || window?.navigator?.standalone;
-
-  // 今天的待辦
-  const [todayTasks, setTodayTasks] = useState([]);
-  const [newTaskText, setNewTaskText] = useState("");
-
-  const refreshToday = async () => {
-    const obj = await readEntry(todayStr);
-    setTodayTasks(obj?.tasks || []);
-  };
-  useEffect(() => { refreshToday(); /* eslint-disable-next-line */ }, [cryptoKey]);
-
-  const mutateToday = async (mutator) => {
-    const obj = (await readEntry(todayStr)) || { text: "", images: [], stickers: [], tasks: [], lastModified: Date.now() };
-    const newObj = mutator({ ...obj, tasks: Array.isArray(obj.tasks) ? obj.tasks : [] });
-    newObj.lastModified = Date.now();
-    await writeEntry(todayStr, newObj);
-    setTodayTasks(newObj.tasks);
-  };
-
-  const addTodayTask = async () => {
-    const t = newTaskText.trim();
-    if (!t) return;
-    await mutateToday((o) => ({ ...o, tasks: [{ id: Date.now() + Math.random(), text: t, done: false }, ...o.tasks] }));
-    setNewTaskText("");
-  };
-
-  const toggleTodayTask = async (id) => {
-    await mutateToday((o) => ({ ...o, tasks: o.tasks.map((it) => (it.id === id ? { ...it, done: !it.done } : it)) }));
-  };
-
-  const updateTodayTaskText = async (id, text) => {
-    await mutateToday((o) => ({ ...o, tasks: o.tasks.map((it) => (it.id === id ? { ...it, text } : it)) }));
-  };
-
-  const removeTodayTask = async (id) => {
-    await mutateToday((o) => ({ ...o, tasks: o.tasks.filter((it) => it.id !== id) }));
-  };
-
-  const reorderTodayTasks = async (fromId, toId) => {
-    await mutateToday((o) => ({ ...o, tasks: reorderByIds(o.tasks, fromId, toId) }));
-  };
-
-  // 逾期/跨日提醒（最近 7 天未完成）
-  const [overdue, setOverdue] = useState([]);
-  const refreshOverdue = async () => {
-    const list = [];
-    for (let i = 1; i <= 7; i++) {
-      const d = new Date(today);
-      d.setDate(today.getDate() - i);
-      const ds = toDateStr(d);
-      const o = await readEntry(ds);
-      if (o?.tasks?.length) {
-        for (const t of o.tasks) if (!t.done) list.push({ dateStr: ds, id: t.id, text: t.text });
-      }
+    // ---- 模板視窗 ----
+    function TemplateModal({ onClose, templates, setTemplates, saveTemplates }){
+      const [newItem,setNewItem]=useState(""), [dragIdx,setDragIdx]=useState(null);
+      const add=()=>{ const t=newItem.trim(); if(!t) return; setTemplates([...templates,t]); setNewItem(""); };
+      const del=(i)=>setTemplates(templates.filter((_,idx)=>idx!==i));
+      const update=(i,v)=>setTemplates(templates.map((x,idx)=>(idx===i?v:x)));
+      const reorder=(from,to)=>{ if(from===to||from==null||to==null) return; const arr=[...templates]; const [item]=arr.splice(from,1); arr.splice(to,0,item); setTemplates(arr); };
+      return (<div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50"><div className="w-full sm:max-w-lg bg-white rounded-2xl shadow-xl max-h-[90svh] sm:max-h-[90vh] overflow-hidden flex flex-col"><div className="flex items-center justify-between px-4 sm:px-6 py-3 border-b shrink-0"><div className="font-semibold">編輯每日模板</div><button onClick={onClose} className="text-gray-500 hover:text-gray-700">✕</button></div><div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-4"><div className="flex items-center gap-2"><input value={newItem} onChange={(e)=>setNewItem(e.target.value)} onKeyDown={(e)=>{ if(e.key==='Enter') add(); }} placeholder="輸入模板項目，Enter 新增" className="flex-1 border rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-300" /><button onClick={add} className="px-3 py-2 rounded-xl bg-emerald-500 text-white text-sm">新增</button></div>{templates?.length?(<ul className="space-y-2">{templates.map((t,i)=>(<li key={i} className="flex items-center gap-2 p-2 rounded-lg border bg-white" draggable onDragStart={()=>setDragIdx(i)} onDragOver={(e)=>e.preventDefault()} onDrop={()=>{ if(dragIdx!=null && dragIdx!==i) reorder(dragIdx,i); setDragIdx(null); }}><span className="cursor-grab select-none px-1 text-gray-400">⋮⋮</span><input className="flex-1 bg-transparent focus:outline-none" value={t} onChange={(e)=>update(i, e.target.value)} /><button onClick={()=>del(i)} className="text-xs text-red-600 hover:underline">刪除</button></li>))}</ul>):(<div className="text-xs text-gray-400">還沒有模板，先新增幾個常用項目吧（例如：喝 2000ml 水、30 分鐘運動、閱讀 20 分鐘⋯⋯）。</div>)}</div><div className="flex items-center justify-end gap-2 px-4 sm:px-6 py-3 border-t bg-white/95 backdrop-blur sticky bottom-0 shrink-0"><button onClick={onClose} className="px-3 py-2 rounded-xl bg-gray-100 hover:bg-gray-200">取消</button><button onClick={async()=>{ await saveTemplates(templates); onClose(); }} className="px-4 py-2 rounded-xl bg-emerald-500 text-white hover:bg-emerald-600">儲存模板</button></div></div></div>);
     }
-    setOverdue(list);
-  };
-  useEffect(() => { refreshOverdue(); /* eslint-disable-next-line */ }, [cryptoKey, refreshKey]);
 
-  const carryOneToToday = async (item, alsoComplete = true) => {
-    await mutateToday((o) => ({ ...o, tasks: [{ id: Date.now() + Math.random(), text: item.text, done: false }, ...o.tasks] }));
-    if (alsoComplete) {
-      const src = await readEntry(item.dateStr);
-      if (src) {
-        src.tasks = src.tasks.map((x) => (x.id === item.id ? { ...x, done: true } : x));
-        src.lastModified = Date.now();
-        await writeEntry(item.dateStr, src);
-      }
-    }
-    refreshOverdue();
-  };
-  const carryAllOverdue = async (alsoComplete = true) => {
-    for (const it of overdue) await carryOneToToday(it, alsoComplete);
-  };
+    // ---- 專案「週看板」 ----
+    function WeeklyBoardModal({ cryptoKey, onClose }) {
+      const getMonday = (d) => { const x = new Date(d.getFullYear(), d.getMonth(), d.getDate()); const day = x.getDay(); const diff = (day === 0 ? -6 : 1 - day); x.setDate(x.getDate()+diff); x.setHours(0,0,0,0); return x; };
+      const [weekStart, setWeekStart] = useState(getMonday(new Date()));
+      const days = useMemo(() => Array.from({length:7},(_,i)=>{ const d=new Date(weekStart); d.setDate(d.getDate()+i); return d; }), [weekStart]);
+      const weekKey = (d) => `${LS_PREFIX}board_${toDateStr(d)}`;
 
-  // 模板
-  const [templates, setTemplates] = useState([]);
-  const [templateOpen, setTemplateOpen] = useState(false);
-  const [boardOpen, setBoardOpen] = useState(false);
-  const loadTemplates = async () => setTemplates(await readTemplates());
-  useEffect(() => { loadTemplates(); /* eslint-disable-next-line */ }, [cryptoKey]);
+      const [rows, setRows] = useState([]); const [loading, setLoading] = useState(true);
+      const load = async () => { setLoading(true); const raw = localStorage.getItem(weekKey(weekStart)); if(!raw){ setRows([]); setLoading(false); return; } try{ const obj = await decryptJSON(JSON.parse(raw), cryptoKey); setRows(Array.isArray(obj.rows)?obj.rows:[]);}catch{ setRows([]);} setLoading(false); };
+      useEffect(()=>{ load(); }, [cryptoKey, weekStart]);
 
-  const applyTemplatesToToday = async () => {
-    if (!templates.length) return alert("目前沒有模板項目，可先到『編輯模板』新增。");
-    await mutateToday((o) => ({
-      ...o,
-      tasks: [
-        ...templates.map((t) => ({ id: Date.now() + Math.random(), text: t, done: false })),
-        ...o.tasks,
-      ],
-    }));
-  };
+      const save = async (nextRows) => { const payload = await encryptJSON({ rows: nextRows, savedAt: Date.now() }, cryptoKey); localStorage.setItem(weekKey(weekStart), JSON.stringify(payload)); };
+      const addRow = () => { const r={id:Date.now()+Math.random(), title:"", daily:{}}; const next=[r,...rows]; setRows(next); save(next); };
+      const delRow = (id) => { const next = rows.filter(r=>r.id!==id); setRows(next); save(next); };
+      const updateTitle = (id, v) => { const next = rows.map(r=>r.id===id?{...r,title:v}:r); setRows(next); save(next); };
+      const updateCell = (id, ds, patch) => { const next = rows.map(r=>{ if(r.id!==id) return r; const cur = r.daily?.[ds] || { plan:"", status:"plan" }; return { ...r, daily: { ...r.daily, [ds]: { ...cur, ...patch } } };}); setRows(next); save(next); };
 
-  const goPrev = () => setMonthDate(new Date(year, month - 1, 1));
-  const goNext = () => setMonthDate(new Date(year, month + 1, 1));
-  const openDay = (d) => setSelectedDate(d);
-  const openToday = () => setSelectedDate(today);
+      const cycleStatus = (s) => (s==='plan'?'done':s==='done'?'delay':s==='delay'?'none':'plan');
+      const statusClass = (s) => (s==='done'?'bg-emerald-100 border-emerald-300':s==='delay'?'bg-amber-100 border-amber-300':s==='plan'?'bg-sky-50 border-sky-200':'bg-white');
 
-  return (
-    <div className="min-h-screen bg-gradient-to-b from-white to-pink-50 p-4 sm:p-8">
-      <div className="mx-auto max-w-5xl">
-        {(inApp || isStandalone) && (
-          <div className="mb-3 text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-xl p-2">
-            偵測到你可能在 App 內建瀏覽器或主畫面 App 模式。若無法選擇檔案，請在 Safari 中開啟此網站後再試（分享 → 在 Safari 打開）。
+      const prevWeek = () => { const d=new Date(weekStart); d.setDate(d.getDate()-7); setWeekStart(d); };
+      const nextWeek = () => { const d=new Date(weekStart); d.setDate(d.getDate()+7); setWeekStart(d); };
+
+      return (<div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-end sm:items-center justify-center z-50">
+        <div className="w-full sm:max-w-5xl bg-white rounded-t-2xl sm:rounded-2xl shadow-xl max-h-[92svh] sm:max-h-[92vh] overflow-hidden flex flex-col">
+          <div className="flex items-center justify-between px-4 sm:px-6 py-3 border-b shrink-0">
+            <div className="flex items-center gap-3">
+              <button onClick={prevWeek} className="px-2 py-1 rounded bg-gray-100 hover:bg-gray-200">←</button>
+              <div className="font-semibold">專案週看板：{toDateStr(days[0])} ~ {toDateStr(days[6])}</div>
+              <button onClick={nextWeek} className="px-2 py-1 rounded bg-gray-100 hover:bg-gray-200">→</button>
+            </div>
+            <button onClick={onClose} className="text-gray-500 hover:text-gray-700">✕</button>
           </div>
-        )}
+
+          <div className="p-3 text-xs text-gray-600 flex flex-wrap gap-3 border-b">
+            <span className="inline-flex items-center gap-1"><span className="inline-block w-3 h-3 rounded border border-sky-200 bg-sky-50"></span> 計畫</span>
+            <span className="inline-flex items-center gap-1"><span className="inline-block w-3 h-3 rounded border border-emerald-300 bg-emerald-100"></span> 如期完成</span>
+            <span className="inline-flex items-center gap-1"><span className="inline-block w-3 h-3 rounded border border-amber-300 bg-amber-100"></span> 延宕</span>
+            <span className="text-gray-400">點一下格子可切換狀態</span>
+          </div>
+
+          <div className="flex-1 overflow-auto p-3">
+            {loading ? (<div className="text-center text-gray-500 py-6">載入中…</div>) : (
+              <div className="min-w-[800px]">
+                <div className="grid grid-cols-[240px_repeat(7,1fr)] text-sm">
+                  <div className="p-2 bg-gray-50 border">本週要做什麼</div>
+                  {days.map((d)=> (<div key={toDateStr(d)} className="p-2 bg-gray-50 border text-center">{toDateStr(d)}</div>))}
+                  {rows.map((r)=>(
+                    <React.Fragment key={r.id}>
+                      <div className="border p-2 flex items-center gap-2">
+                        <span className="cursor-grab select-none text-gray-300">⋮⋮</span>
+                        <input className="flex-1 bg-transparent focus:outline-none" placeholder="例如：週報 / 客戶簡報 / 研究…" value={r.title} onChange={(e)=>updateTitle(r.id, e.target.value)} />
+                        <button onClick={()=>delRow(r.id)} className="text-xs text-red-600 hover:underline">刪除</button>
+                      </div>
+                      {days.map((d)=>{ const ds=toDateStr(d); const cell=r.daily?.[ds] || {plan:"",status:"plan"}; return (
+                        <div key={ds} className={`border p-2 ${statusClass(cell.status)} transition`} onClick={()=>updateCell(r.id, ds, { status: cycleStatus(cell.status) })}>
+                          <textarea className="w-full h-16 resize-none bg-transparent focus:outline-none text-sm" placeholder="預計進度/交付…（點格子切換狀態）" value={cell.plan} onChange={(e)=>updateCell(r.id, ds, { plan: e.target.value })} onClick={(e)=>e.stopPropagation()} />
+                        </div>
+                      );})}
+                    </React.Fragment>
+                  ))}
+                </div>
+                <div className="mt-3"><button onClick={addRow} className="px-3 py-2 rounded-xl bg-gray-800 text-white text-sm">新增一列</button></div>
+              </div>
+            )}
+          </div>
+
+          <div className="flex items-center justify-end gap-2 px-4 sm:px-6 py-3 border-t bg-white/95 backdrop-blur shrink-0">
+            <button onClick={onClose} className="px-3 py-2 rounded-xl bg-gray-100 hover:bg-gray-200">關閉</button>
+          </div>
+        </div>
+      </div>);
+    }
+
+    // ---- App（首頁 + 月曆 + 入口列）----
+    function DiaryApp({ monthDate, setMonthDate, selectedDate, setSelectedDate, cryptoKey, logout, resetAll }) {
+      const year = monthDate.getFullYear(); const month = monthDate.getMonth(); const cells = useMemo(() => getMonthMatrix(year, month), [year, month]);
+      const [refreshKey, setRefreshKey] = useState(0);
+      const entryMap = useMemo(()=>{ const map=new Set(); const daysInMonth=new Date(year,month+1,0).getDate(); for(let d=1; d<=daysInMonth; d++){ const k=`${LS_PREFIX}${year}-${String(month+1).padStart(2,"0")}-${String(d).padStart(2,"0")}`; if(localStorage.getItem(k)) map.add(d);} return map; }, [year,month,selectedDate,refreshKey]);
+      const today = new Date(); const todayStr = toDateStr(today);
+
+      const readEntry = async (dateStr) => { const raw=localStorage.getItem(`${LS_PREFIX}${dateStr}`); if(!raw) return null; const payload=JSON.parse(raw); const obj=await decryptJSON(payload, cryptoKey); if(!Array.isArray(obj.tasks)) obj.tasks=[]; if(!Array.isArray(obj.images)) obj.images=[]; if(!Array.isArray(obj.stickers)) obj.stickers=[]; return obj; };
+      const writeEntry = async (dateStr,obj)=>{ const payload=await encryptJSON(obj, cryptoKey); localStorage.setItem(`${LS_PREFIX}${dateStr}`, JSON.stringify(payload)); setRefreshKey(v=>v+1); };
+
+      const readTemplates = async ()=>{ const raw=localStorage.getItem(LS_TEMPLATES); if(!raw) return []; try { return await decryptJSON(JSON.parse(raw), cryptoKey);} catch { return []; } };
+      const writeTemplates = async (arr)=>{ const payload=await encryptJSON(arr, cryptoKey); localStorage.setItem(LS_TEMPLATES, JSON.stringify(payload)); };
+      const readCustomStickers = async ()=>{ const raw=localStorage.getItem(LS_CSTICKERS); if(!raw) return []; try { return await decryptJSON(JSON.parse(raw), cryptoKey);} catch { return []; } };
+      const writeCustomStickers = async (arr)=>{ const payload=await encryptJSON(arr, cryptoKey); localStorage.setItem(LS_CSTICKERS, JSON.stringify(payload)); };
+
+      const importRef = useRef(null);
+      const exportBackup = () => { const data={}; for (const k of Object.keys(localStorage)) if (k.startsWith(LS_PREFIX)) data[k]=localStorage.getItem(k); const blob=new Blob([JSON.stringify({_meta:{when:new Date().toISOString()}, data}, null, 2)], {type:"application/json"}); const url=URL.createObjectURL(blob); const a=document.createElement("a"); a.href=url; a.download=`mood-diary-backup-${Date.now()}.json`; a.click(); URL.revokeObjectURL(url); };
+      const importBackup = async (file)=>{ try{ const text=await file.text(); const parsed=JSON.parse(text); if(!parsed?.data || typeof parsed.data!=="object") throw new Error("格式錯誤"); if(!confirm("匯入將覆蓋現有相同鍵值的資料，繼續嗎？")) return; for (const [k,v] of Object.entries(parsed.data)) localStorage.setItem(k,v); alert("匯入成功。"); setRefreshKey(v=>v+1); refreshToday(); refreshOverdue(); loadTemplates(); } catch { alert("匯入失敗：格式不正確或檔案損毀。"); } };
+
+      // 今天待辦
+      const [todayTasks,setTodayTasks]=useState([]), [newTaskText,setNewTaskText]=useState("");
+      const refreshToday = async()=>{ const obj=await readEntry(todayStr); setTodayTasks(obj?.tasks || []); };
+      useEffect(()=>{ refreshToday(); }, [cryptoKey]);
+      const mutateToday = async (mutator)=>{ const obj=(await readEntry(todayStr)) || { text:"", images:[], stickers:[], tasks:[], lastModified:Date.now() }; const newObj=mutator({ ...obj, tasks:Array.isArray(obj.tasks)?obj.tasks:[] }); newObj.lastModified=Date.now(); await writeEntry(todayStr,newObj); setTodayTasks(newObj.tasks); };
+      const addTodayTask = async ()=>{ const t=newTaskText.trim(); if(!t) return; await mutateToday(o=>({ ...o, tasks:[{ id:Date.now()+Math.random(), text:t, done:false }, ...o.tasks] })); setNewTaskText(""); };
+      const toggleTodayTask = async (id)=>{ await mutateToday(o=>({ ...o, tasks:o.tasks.map(it=>it.id===id?{...it,done:!it.done}:it) })); };
+      const updateTodayTaskText = async (id,text)=>{ await mutateToday(o=>({ ...o, tasks:o.tasks.map(it=>it.id===id?{...it,text}:it) })); };
+      const removeTodayTask = async (id)=>{ await mutateToday(o=>({ ...o, tasks:o.tasks.filter(it=>it.id!==id) })); };
+      const reorderTodayTasks = async (fromId,toId)=>{ await mutateToday(o=>({ ...o, tasks:reorderByIds(o.tasks, fromId, toId) })); };
+
+      // 逾期
+      const [overdue,setOverdue]=useState([]);
+      const refreshOverdue = async()=>{ const list=[]; for(let i=1;i<=7;i++){ const d=new Date(today); d.setDate(today.getDate()-i); const ds=toDateStr(d); const o=await readEntry(ds); if(o?.tasks?.length) for(const t of o.tasks) if(!t.done) list.push({ dateStr:ds, id:t.id, text:t.text }); } setOverdue(list); };
+      useEffect(()=>{ refreshOverdue(); }, [cryptoKey, refreshKey]);
+      const carryOneToToday = async (item, alsoComplete=true)=>{ await mutateToday(o=>({ ...o, tasks:[{ id:Date.now()+Math.random(), text:item.text, done:false }, ...o.tasks] })); if(alsoComplete){ const src=await readEntry(item.dateStr); if(src){ src.tasks=src.tasks.map(x=>x.id===item.id?{...x,done:true}:x); src.lastModified=Date.now(); await writeEntry(item.dateStr, src); } } refreshOverdue(); };
+      const carryAllOverdue = async (alsoComplete=true)=>{ for(const it of overdue) await carryOneToToday(it, alsoComplete); };
+
+      // 模板
+      const [templates,setTemplates]=useState([]), [templateOpen,setTemplateOpen]=useState(false);
+      const [boardOpen,setBoardOpen]=useState(false);
+      const loadTemplates = async ()=> setTemplates(await readTemplates());
+      useEffect(()=>{ loadTemplates(); }, [cryptoKey]);
+      const applyTemplatesToToday = async ()=>{ if(!templates.length) return alert("目前沒有模板項目，可先到『編輯模板』新增。"); await mutateToday(o=>({ ...o, tasks:[ ...templates.map(t=>({ id:Date.now()+Math.random(), text:t, done:false })), ...o.tasks ] })); };
+
+      const goPrev=()=>setMonthDate(new Date(year, month-1, 1));
+      const goNext=()=>setMonthDate(new Date(year, month+1, 1));
+      const openDay=(d)=>setSelectedDate(d);
+      const openToday=()=>setSelectedDate(today);
+
+      return (<div className="min-h-screen bg-gradient-to-b from-white to-pink-50 p-4 sm:p-8"><div className="mx-auto max-w-5xl">
         <header className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
-          <div>
-            <h1 className="text-2xl sm:text-3xl font-bold">心情日記</h1>
-            <p className="text-xs text-gray-500 mt-1">🔐 已加密 · 儲存在此瀏覽器</p>
-          </div>
+          <div><h1 className="text-2xl sm:text-3xl font-bold">心情日記</h1><p className="text-xs text-gray-500 mt-1">🔐 已加密 · 儲存在此瀏覽器</p></div>
           <div className="flex flex-wrap items-center gap-2">
-            <button onClick={() => exportBackup()} className="px-3 py-2 rounded-xl bg-gray-800 text-white text-sm hover:opacity-90">備份</button>
-            <button onClick={() => importRef.current?.click()} className="px-3 py-2 rounded-xl bg-gray-200 text-sm hover:opacity-90">匯入</button>
-            <input ref={importRef} type="file" accept="application/json" className="hidden" onChange={(e) => e.target.files?.[0] && importBackup(e.target.files[0])} />
+            <button onClick={()=>exportBackup()} className="px-3 py-2 rounded-xl bg-gray-800 text-white text-sm hover:opacity-90">備份</button>
+            <button onClick={()=>importRef.current?.click()} className="px-3 py-2 rounded-xl bg-gray-200 text-sm hover:opacity-90">匯入</button>
+            <input ref={importRef} type="file" accept="application/json" className="hidden" onChange={(e)=>e.target.files?.[0] && importBackup(e.target.files[0])} />
             <button onClick={applyTemplatesToToday} className="px-3 py-2 rounded-xl bg-emerald-500 text-white text-sm hover:bg-emerald-600">套用模板到今天</button>
-            <button onClick={() => setTemplateOpen(true)} className="px-3 py-2 rounded-xl bg-emerald-100 text-emerald-800 text-sm hover:bg-emerald-200">編輯模板</button>
-            <button onClick={() => setBoardOpen(true)} className="px-3 py-2 rounded-xl bg-blue-100 text-blue-800 text-sm hover:bg-blue-200">專案週看板</button>
+            <button onClick={()=>setTemplateOpen(true)} className="px-3 py-2 rounded-xl bg-emerald-100 text-emerald-800 text-sm hover:bg-emerald-200">編輯模板</button>
+            <button onClick={()=>setBoardOpen(true)} className="px-3 py-2 rounded-xl bg-blue-100 text-blue-800 text-sm hover:bg-blue-200">專案週看板</button>
             <button onClick={openToday} className="px-3 py-2 rounded-xl bg-pink-500 text-white text-sm hover:bg-pink-600">今天日記</button>
             <button onClick={logout} className="px-3 py-2 rounded-xl bg-purple-500 text-white text-sm hover:bg-purple-600">登出</button>
             <button onClick={resetAll} className="px-3 py-2 rounded-xl bg-red-500 text-white text-sm hover:bg-red-600">重設（清空）</button>
           </div>
         </header>
 
-        {/* 今天的待辦：進入就看到 */}
-        <TodayTasksCard
-          dateStr={todayStr}
-          tasks={todayTasks}
-          newTaskText={newTaskText}
-          setNewTaskText={setNewTaskText}
-          addTask={addTodayTask}
-          toggleTask={toggleTodayTask}
-          updateTaskText={updateTodayTaskText}
-          removeTask={removeTodayTask}
-          reorderTasks={reorderTodayTasks}
-          openToday={openToday}
-        />
-
-        {/* 逾期/跨日提醒 */}
+        <TodayTasksCard dateStr={todayStr} tasks={todayTasks} newTaskText={newTaskText} setNewTaskText={setNewTaskText} addTask={addTodayTask} toggleTask={toggleTodayTask} updateTaskText={updateTodayTaskText} removeTask={removeTodayTask} reorderTasks={reorderTodayTasks} openToday={openToday}/>
         <OverdueCard overdue={overdue} carryOne={carryOneToToday} carryAll={carryAllOverdue} />
 
         <div className="bg-white/80 backdrop-blur rounded-2xl shadow p-4 sm:p-6 mt-4">
@@ -503,672 +252,31 @@ function DiaryApp({ monthDate, setMonthDate, selectedDate, setSelectedDate, cryp
           <CalendarGrid cells={cells} entryMap={entryMap} todayStr={todayStr} onPick={openDay} />
         </div>
 
-        {selectedDate && (
-          <EntryModal
-            date={selectedDate}
-            onClose={() => setSelectedDate(null)}
-            onChanged={() => {
-              if (toDateStr(selectedDate) === todayStr) refreshToday();
-              setRefreshKey((v) => v + 1);
-              refreshOverdue();
-            }}
-            cryptoKey={cryptoKey}
-            readCustomStickers={readCustomStickers}
-            writeCustomStickers={writeCustomStickers}
-          />
-        )}
+        {selectedDate && (<EntryModal date={selectedDate} onClose={()=>setSelectedDate(null)} onChanged={()=>{ if(toDateStr(selectedDate)===todayStr) refreshToday(); setRefreshKey(v=>v+1); refreshOverdue(); }} cryptoKey={cryptoKey} readCustomStickers={readCustomStickers} writeCustomStickers={writeCustomStickers} />)}
+        {templateOpen && (<TemplateModal onClose={()=>setTemplateOpen(false)} templates={templates} setTemplates={setTemplates} saveTemplates={async(arr)=>{ await writeTemplates(arr); setTemplates(arr); }} />)}
+        {boardOpen && (<WeeklyBoardModal cryptoKey={cryptoKey} onClose={()=>setBoardOpen(false)} />)}
 
-        {templateOpen && (
-          <TemplateModal
-            onClose={() => setTemplateOpen(false)}
-            templates={templates}
-            setTemplates={setTemplates}
-            saveTemplates={async (arr) => { await writeTemplates(arr); setTemplates(arr); }}
-          />
-        )}
-
-        {boardOpen && (
-          <WeeklyBoardModal cryptoKey={cryptoKey} onClose={() => setBoardOpen(false)} />
-        )}
-
-            templates={templates}
-            setTemplates={setTemplates}
-            saveTemplates={async (arr) => { await writeTemplates(arr); setTemplates(arr); }}
-          />
-        )}
-
-        <footer className="text-center text-xs text-gray-400 mt-6">
-          <p>小提醒：大量照片/貼圖會佔用瀏覽器空間，建議不定期備份與清理。</p>
-        </footer>
-      </div>
-    </div>
-  );
-
-  // 匯出/匯入
-  function exportBackup() {
-    const data = {};
-    for (const k of Object.keys(localStorage)) if (k.startsWith(LS_PREFIX)) data[k] = localStorage.getItem(k);
-    const blob = new Blob([JSON.stringify({ _meta: { when: new Date().toISOString() }, data }, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `mood-diary-backup-${Date.now()}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-  }
-
-  async function importBackup(file) {
-    try {
-      const text = await file.text();
-      const parsed = JSON.parse(text);
-      if (!parsed?.data || typeof parsed.data !== "object") throw new Error("格式錯誤");
-      if (!confirm("匯入將覆蓋現有相同鍵值的資料，繼續嗎？")) return;
-      for (const [k, v] of Object.entries(parsed.data)) localStorage.setItem(k, v);
-      alert("匯入成功。");
-      setRefreshKey((v) => v + 1);
-      refreshToday();
-      refreshOverdue();
-      loadTemplates();
-    } catch (e) {
-      console.error(e);
-      alert("匯入失敗：格式不正確或檔案損毀。");
+        <footer className="text-center text-xs text-gray-400 mt-6"><p>小提醒：大量照片/貼圖會佔用瀏覽器空間，建議不定期備份與清理。</p></footer>
+      </div></div>);
     }
-  }
-}
 
-function TodayTasksCard({ dateStr, tasks, newTaskText, setNewTaskText, addTask, toggleTask, updateTaskText, removeTask, reorderTasks, openToday }) {
-  const hasTasks = tasks && tasks.length > 0;
-  const done = tasks.filter((t) => t.done).length;
-  const total = tasks.length;
-  const pct = total ? Math.round((done * 100) / total) : 0;
-
-  const [dragId, setDragId] = useState(null);
-
-  return (
-    <div className={"rounded-2xl shadow "+ (hasTasks?"bg-white/90":"bg-white/70") +" p-4 sm:p-6"}>
-      <div className="flex items-center justify-between mb-3">
-        <div>
-          <div className="text-sm text-gray-500">今天 {dateStr}</div>
-          <div className="text-lg font-semibold">今天的待辦</div>
-        </div>
-        <div className="flex items-center gap-3">
-          {/* 完成率圓餅 */}
-          <div className="relative w-10 h-10 rounded-full" style={{ background: `conic-gradient(#ec4899 ${pct}%, #e5e7eb 0)` }}>
-            <div className="absolute inset-1 rounded-full bg-white flex items-center justify-center text-xs text-gray-600">{done}/{total}</div>
-          </div>
-          <button onClick={openToday} className="px-3 py-1.5 rounded-lg bg-pink-500 text-white text-sm hover:bg-pink-600">編輯今天日記</button>
-        </div>
-      </div>
-
-      {/* 快速新增 */}
-      <div className="flex items-center gap-2 mb-3">
-        <input
-          value={newTaskText}
-          onChange={(e) => setNewTaskText(e.target.value)}
-          onKeyDown={(e) => { if (e.key === 'Enter') addTask(); }}
-          placeholder={hasTasks ? "新增待辦..." : "寫下今天要做的事（Enter 新增）"}
-          className="flex-1 border rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-300"
-        />
-        <button onClick={addTask} className="px-3 py-2 rounded-xl bg-gray-800 text-white text-sm">新增</button>
-      </div>
-
-      {hasTasks ? (
-        <ul className="space-y-2">
-          {tasks.map((t) => (
-            <li
-              key={t.id}
-              className="flex items-center gap-2 p-2 rounded-lg border bg-white"
-              draggable
-              onDragStart={() => setDragId(t.id)}
-              onDragOver={(e) => e.preventDefault()}
-              onDrop={() => { if (dragId && dragId !== t.id) reorderTasks(dragId, t.id); setDragId(null); }}
-            >
-              <span className="cursor-grab select-none px-1 text-gray-400">⋮⋮</span>
-              <input type="checkbox" checked={!!t.done} onChange={() => toggleTask(t.id)} className="w-5 h-5" />
-              <input
-                className={"flex-1 bg-transparent focus:outline-none " + (t.done ? "line-through text-gray-400" : "")}
-                value={t.text}
-                onChange={(e) => updateTaskText(t.id, e.target.value)}
-              />
-              <button onClick={() => removeTask(t.id)} className="text-xs text-red-600 hover:underline">刪除</button>
-            </li>
-          ))}
-        </ul>
-      ) : (
-        <div className="text-sm text-gray-500">今天還沒有待辦，先寫一個吧！</div>
-      )}
-    </div>
-  );
-}
-
-function OverdueCard({ overdue, carryOne, carryAll }) {
-  if (!overdue?.length) return null;
-  return (
-    <div className="rounded-2xl shadow bg-white p-4 sm:p-6 mt-4">
-      <div className="flex items-center justify-between mb-2">
-        <div className="text-lg font-semibold">跨日提醒（最近 7 天未完成）</div>
-        <div className="flex items-center gap-2 text-sm">
-          <button onClick={() => carryAll(true)} className="px-3 py-1.5 rounded-lg bg-emerald-500 text-white hover:bg-emerald-600">全部帶到今天並標記原任務完成</button>
-          <button onClick={() => carryAll(false)} className="px-3 py-1.5 rounded-lg bg-gray-200 hover:bg-gray-300">全部帶到今天（不標記完成）</button>
-        </div>
-      </div>
-      <ul className="space-y-2">
-        {overdue.map((it, i) => (
-          <li key={i} className="flex items-center justify-between p-2 rounded-lg border bg-white">
-            <div className="text-sm"><span className="text-gray-500 mr-2">{it.dateStr}</span>{it.text}</div>
-            <div className="flex items-center gap-2 text-xs">
-              <button onClick={() => carryOne(it, true)} className="px-2 py-1 rounded bg-emerald-100 text-emerald-800 hover:bg-emerald-200">帶到今天+完成原任務</button>
-              <button onClick={() => carryOne(it, false)} className="px-2 py-1 rounded bg-gray-100 hover:bg-gray-200">只帶到今天</button>
-            </div>
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
-}
-
-function CalendarGrid({ cells, entryMap, todayStr, onPick }) {
-  const weekdays = ["日", "一", "二", "三", "四", "五", "六"];
-  return (
-    <div>
-      <div className="grid grid-cols-7 text-center text-sm text-gray-500 mb-2">
-        {weekdays.map((w) => (
-          <div key={w} className="py-1">{w}</div>
-        ))}
-      </div>
-      <div className="grid grid-cols-7 gap-1 sm:gap-2">
-        {cells.map((d, idx) => {
-          if (!d) return <div key={idx} className="aspect-square rounded-xl bg-transparent" />;
-          const dateStr = toDateStr(d);
-          const isToday = dateStr === todayStr;
-          const has = entryMap.has(d.getDate());
-          return (
-            <button
-              key={idx}
-              onClick={() => onPick(d)}
-              className={
-                "aspect-square rounded-xl p-2 text-left border hover:shadow transition " +
-                (isToday ? "border-pink-400 bg-pink-50" : "border-gray-200 bg-white")
-              }
-              title={has ? "有日記/待辦" : ""}
-            >
-              <div className="flex items-center justify-between">
-                <div className="text-sm font-semibold">{d.getDate()}</div>
-                {has && <span className="inline-block w-2 h-2 rounded-full bg-pink-500" />}
-              </div>
-            </button>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-function EntryModal({ date, onClose, onChanged, cryptoKey, readCustomStickers, writeCustomStickers }) {
-  const dateStr = toDateStr(date);
-  const [text, setText] = useState("");
-  const [images, setImages] = useState([]); // DataURL 陣列
-  const [stickers, setStickers] = useState([]); // 可混合：emoji 字元 或 data:image/* DataURL
-  const [tasks, setTasks] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [newTask, setNewTask] = useState("");
-
-  // 自訂貼圖庫
-  const [libStickers, setLibStickers] = useState([]);
-
-  useEffect(() => {
-    (async () => {
-      try {
-        const raw = localStorage.getItem(`${LS_PREFIX}${dateStr}`);
-        if (raw) {
-          const payload = JSON.parse(raw);
-          const obj = await decryptJSON(payload, cryptoKey);
-          setText(obj.text || "");
-          setImages(Array.isArray(obj.images) ? obj.images : []);
-          const st = Array.isArray(obj.stickers) ? obj.stickers : [];
-          setStickers(st);
-          setTasks(Array.isArray(obj.tasks) ? obj.tasks : []);
-        }
-        if (readCustomStickers) setLibStickers(await readCustomStickers());
-      } catch (e) {
-        console.error(e);
-        alert("讀取資料失敗，可能是密碼變更或資料損毀。");
-      } finally {
-        setLoading(false);
-      }
-    })();
-  }, [dateStr, cryptoKey]);
-
-  const onAddImages = async (files) => {
-    const list = Array.from(files || []);
-    const converted = [];
-    for (const f of list) converted.push(await fileToDataURLCompressed(f));
-    setImages((prev) => [...converted, ...prev]);
-  };
-
-  const onSave = async () => {
-    try {
-      setSaving(true);
-      const payload = await encryptJSON({ text, images, stickers, tasks, lastModified: Date.now() }, cryptoKey);
-      localStorage.setItem(`${LS_PREFIX}${dateStr}`, JSON.stringify(payload));
-      onClose();
-      onChanged && onChanged();
-    } catch (e) {
-      console.error(e);
-      alert("儲存失敗");
-    } finally {
-      setSaving(false);
+    // ---- 殼：登入/解鎖 ----
+    function DiaryShell(){
+      const [unlocked,setUnlocked]=useState(false);
+      const [cryptoKey,setCryptoKey]=useState(null);
+      const [monthDate,setMonthDate]=useState(new Date());
+      const [selectedDate,setSelectedDate]=useState(null);
+      const [hasVerifier,setHasVerifier]=useState(false);
+      useEffect(()=>{ setHasVerifier(Boolean(localStorage.getItem(LS_SALT) && localStorage.getItem(LS_VERIFIER))); },[]);
+      const handleSetPassword=async(pwd)=>{ const {key,saltB64}=await deriveKey(pwd,null); const verifierPayload=await encryptJSON({v:"ok"}, key); localStorage.setItem(LS_SALT, saltB64); localStorage.setItem(LS_VERIFIER, JSON.stringify(verifierPayload)); setHasVerifier(true); setCryptoKey(key); setUnlocked(true); };
+      const handleUnlock=async(pwd)=>{ try{ const saltB64=localStorage.getItem(LS_SALT); const {key}=await deriveKey(pwd, saltB64); const verifierPayload=JSON.parse(localStorage.getItem(LS_VERIFIER)); const res=await decryptJSON(verifierPayload, key); if(res?.v==="ok"){ setCryptoKey(key); setUnlocked(true); } else alert("密碼錯誤"); }catch(e){ console.error(e); alert("密碼錯誤或資料已損毀。"); } };
+      const logout=()=>{ setUnlocked(false); setCryptoKey(null); };
+      const resetAll=()=>{ if(!confirm("⚠️ 將清空所有日記資料與密碼設定，且無法復原。確定嗎？")) return; Object.keys(localStorage).filter(k=>k.startsWith(LS_PREFIX)).forEach(k=>localStorage.removeItem(k)); setUnlocked(false); setCryptoKey(null); alert("已清空。重新整理後可重新設定密碼。"); };
+      if(!unlocked){ return (<div className="min-h-screen bg-gradient-to-b from-pink-50 to-purple-50 flex items-center justify-center p-6"><div className="w-full max-w-md bg-white/80 backdrop-blur shadow-xl rounded-2xl p-6"><div className="text-center mb-6"><div className="text-3xl font-bold">心情日記</div><div className="text-sm text-gray-500 mt-1">本機加密儲存 · 私密保護</div></div>{hasVerifier?(<UnlockForm onUnlock={handleUnlock} />):(<SetPasswordForm onSet={handleSetPassword} />)}<div className="mt-6 text-xs text-gray-500 leading-relaxed"><p>提示：此應用將內容加密後存於你的瀏覽器 <code>localStorage</code>。換電腦/清除瀏覽器資料會遺失內容，建議定期「備份」。</p><p className="mt-1">忘記密碼無法復原，請妥善保管。</p></div></div></div>); }
+      return (<DiaryApp monthDate={monthDate} setMonthDate={setMonthDate} selectedDate={selectedDate} setSelectedDate={setSelectedDate} cryptoKey={cryptoKey} logout={logout} resetAll={resetAll} />);
     }
-  };
 
-  const onDelete = () => {
-    if (!confirm("刪除此日期的日記與圖片/待辦？")) return;
-    localStorage.removeItem(`${LS_PREFIX}${dateStr}`);
-    onClose();
-    onChanged && onChanged();
-  };
-
-  const addStickerEmoji = (s) => setStickers((prev) => [s, ...prev]);
-  const removeImage = (idx) => setImages((prev) => prev.filter((_, i) => i !== idx));
-  const removeSticker = (idx) => setStickers((prev) => prev.filter((_, i) => i !== idx));
-
-  // 待辦（在日記視窗內）含拖拉排序
-  const [dragId, setDragId] = useState(null);
-  const addTask = () => {
-    const t = newTask.trim();
-    if (!t) return;
-    setTasks((prev) => [{ id: Date.now() + Math.random(), text: t, done: false }, ...prev]);
-    setNewTask("");
-  };
-  const toggleTask = (id) => setTasks((prev) => prev.map((x) => (x.id === id ? { ...x, done: !x.done } : x)));
-  const updateTaskText = (id, text) => setTasks((prev) => prev.map((x) => (x.id === id ? { ...x, text } : x)));
-  const removeTask = (id) => setTasks((prev) => prev.filter((x) => x.id !== id));
-  const reorderTaskLocal = (from, to) => setTasks((prev) => reorderByIds(prev, from, to));
-
-  // 自訂貼圖庫：上傳/刪除/點選插入
-  const onUploadStickers = async (files) => {
-    const list = Array.from(files || []);
-    const converted = [];
-    for (const f of list) converted.push(await fileToDataURLCompressed(f));
-    const newLib = [...converted, ...libStickers];
-    setLibStickers(newLib);
-    if (writeCustomStickers) await writeCustomStickers(newLib);
-  };
-  const deleteLibSticker = async (idx) => {
-    const newLib = libStickers.filter((_, i) => i !== idx);
-    setLibStickers(newLib);
-    if (writeCustomStickers) await writeCustomStickers(newLib);
-  };
-  const useLibSticker = (src) => setStickers((prev) => [src, ...prev]);
-
-  const renderStickerItem = (s, i) => {
-    const isImg = typeof s === 'string' && s.startsWith('data:image');
-    return (
-      <div key={i} className="relative">
-        {isImg ? (
-          <img src={s} alt="sticker" className="w-12 h-12 object-contain" />
-        ) : (
-          <span className="text-3xl leading-none">{s}</span>
-        )}
-        <button onClick={() => removeSticker(i)} className="absolute -top-2 -right-2 bg-black/60 text-white text-xs rounded-full px-1">✕</button>
-      </div>
-    );
-  };
-
-  return (
-    <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-end sm:items-center justify-center z-50">
-      {/* 使整個彈窗成為 flex 容器，內容區可獨立滾動，底部操作列永遠可見 */}
-      <div className="w-full sm:max-w-3xl bg-white rounded-t-2xl sm:rounded-2xl shadow-xl max-h-[90svh] sm:max-h-[90vh] overflow-hidden flex flex-col">
-        <div className="flex items-center justify-between px-4 sm:px-6 py-3 border-b shrink-0">
-          <div className="font-semibold">{dateStr} 的心情</div>
-          <button onClick={onClose} className="text-gray-500 hover:text-gray-700">✕</button>
-        </div>
-
-        {/* 內容區可滾動 */}
-        <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-6">
-          {loading ? (
-            <div className="text-center text-gray-500">載入中…</div>
-          ) : (
-            <>
-              <section>
-                <label className="text-sm text-gray-600">文字內容</label>
-                <textarea
-                  value={text}
-                  onChange={(e) => setText(e.target.value)}
-                  rows={6}
-                  className="mt-1 w-full border rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-300"
-                  placeholder="今天的心情⋯⋯"
-                />
-              </section>
-
-              <section className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <div className="text-sm text-gray-600">照片</div>
-                  <label className="px-3 py-1.5 rounded-lg bg-gray-100 text-sm cursor-pointer hover:bg-gray-200">
-                    新增照片
-                    <input type="file" accept="image/*" multiple className="hidden" onChange={(e) => onAddImages(e.target.files)} />
-                  </label>
-                </div>
-                {images.length === 0 ? (
-                  <div className="text-xs text-gray-400">尚未加入照片</div>
-                ) : (
-                  <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
-                    {images.map((src, idx) => (
-                      <div key={idx} className="relative group">
-                        <img src={src} alt="uploaded" className="w-full h-24 object-cover rounded-lg border" />
-                        <button onClick={() => removeImage(idx)} className="absolute top-1 right-1 bg-black/60 text-white text-xs px-1.5 py-0.5 rounded opacity-0 group-hover:opacity-100">刪除</button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </section>
-
-              {/* 可愛貼圖（內建 + 自訂貼圖庫） */}
-              <section className="space-y-3">
-                <div className="text-sm text-gray-600">可愛貼圖</div>
-                <div className="flex flex-wrap gap-2">
-                  {STICKERS.map((s) => (
-                    <button key={s} onClick={() => addStickerEmoji(s)} className="text-2xl hover:scale-110 transition">{s}</button>
-                  ))}
-                </div>
-
-                <div className="mt-2">
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="text-sm text-gray-600">自訂貼圖庫（點擊可插入）</div>
-                    <label className="px-3 py-1.5 rounded-lg bg-gray-100 text-sm cursor-pointer hover:bg-gray-200">
-                      上傳貼圖
-                      <input type="file" accept="image/*" multiple className="hidden" onChange={async (e) => e.target.files?.length && (await onUploadStickers(e.target.files))} />
-                    </label>
-                  </div>
-                  {libStickers.length ? (
-                    <div className="grid grid-cols-6 sm:grid-cols-8 gap-2">
-                      {libStickers.map((src, idx) => (
-                        <div key={idx} className="relative group">
-                          <img src={src} alt="sticker" className="w-12 h-12 object-contain border rounded-lg bg-white cursor-pointer" onClick={() => useLibSticker(src)} />
-                          <button onClick={() => deleteLibSticker(idx)} className="absolute -top-2 -right-2 bg-black/60 text-white text-[10px] rounded-full px-1 opacity-0 group-hover:opacity-100">✕</button>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="text-xs text-gray-400">尚無自訂貼圖，先上傳 PNG/JPG 試試！</div>
-                  )}
-                </div>
-
-                {stickers.length > 0 && (
-                  <div className="flex flex-wrap gap-2 mt-2">
-                    {stickers.map((s, i) => renderStickerItem(s, i))}
-                  </div>
-                )}
-              </section>
-
-              {/* 待辦清單（含拖拉排序） */}
-              <section className="space-y-2">
-                <div className="text-sm text-gray-600">當日事項（可打勾，拖拉排序）</div>
-                <div className="flex items-center gap-2">
-                  <input
-                    value={newTask}
-                    onChange={(e) => setNewTask(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === 'Enter') addTask(); }}
-                    placeholder="輸入待辦，Enter 新增"
-                    className="flex-1 border rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-300"
-                  />
-                  <button onClick={addTask} className="px-3 py-2 rounded-xl bg-gray-800 text-white text-sm">新增</button>
-                </div>
-                {tasks.length > 0 ? (
-                  <ul className="space-y-2">
-                    {tasks.map((t) => (
-                      <li
-                        key={t.id}
-                        className="flex items-center gap-2 p-2 rounded-lg border bg-white"
-                        draggable
-                        onDragStart={() => setDragId(t.id)}
-                        onDragOver={(e) => e.preventDefault()}
-                        onDrop={() => { if (dragId && dragId !== t.id) reorderTaskLocal(dragId, t.id); setDragId(null); }}
-                      >
-                        <span className="cursor-grab select-none px-1 text-gray-400">⋮⋮</span>
-                        <input type="checkbox" checked={!!t.done} onChange={() => toggleTask(t.id)} className="w-5 h-5" />
-                        <input
-                          className={"flex-1 bg-transparent focus:outline-none " + (t.done ? "line-through text-gray-400" : "")}
-                          value={t.text}
-                          onChange={(e) => updateTaskText(t.id, e.target.value)}
-                        />
-                        <button onClick={() => removeTask(t.id)} className="text-xs text-red-600 hover:underline">刪除</button>
-                      </li>
-                    ))}
-                  </ul>
-                ) : (
-                  <div className="text-xs text-gray-400">還沒有事項，先加一個吧！</div>
-                )}
-              </section>
-            </>
-          )}
-        </div>
-
-        {/* 底部操作列保持可見 */}
-        <div className="flex items-center justify-between px-4 sm:px-6 py-3 border-t bg-white/95 backdrop-blur sticky bottom-0 shrink-0">
-          <button onClick={onDelete} className="px-3 py-2 rounded-xl bg-red-100 text-red-700 hover:bg-red-200">刪除此日</button>
-          <div className="flex items-center gap-2">
-            <button onClick={onClose} className="px-3 py-2 rounded-xl bg-gray-100 hover:bg-gray-200">取消</button>
-            <button onClick={onSave} disabled={saving} className="px-4 py-2 rounded-xl bg-pink-500 text-white hover:bg-pink-600 disabled:opacity-60">
-              {saving ? "儲存中…" : "儲存"}
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function TemplateModal({ onClose, templates, setTemplates, saveTemplates }) {
-  const [newItem, setNewItem] = useState("");
-  const [dragIdx, setDragIdx] = useState(null);
-
-  const add = () => {
-    const t = newItem.trim();
-    if (!t) return;
-    setTemplates([...templates, t]);
-    setNewItem("");
-  };
-  const del = (i) => setTemplates(templates.filter((_, idx) => idx !== i));
-  const update = (i, v) => setTemplates(templates.map((x, idx) => (idx === i ? v : x)));
-  const reorder = (from, to) => {
-    if (from === to || from == null || to == null) return;
-    const arr = [...templates];
-    const [item] = arr.splice(from, 1);
-    arr.splice(to, 0, item);
-    setTemplates(arr);
-  };
-
-  return (
-    <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50">
-      <div className="w-full sm:max-w-lg bg-white rounded-2xl shadow-xl max-h-[90svh] sm:max-h-[90vh] overflow-hidden flex flex-col">
-        <div className="flex items-center justify-between px-4 sm:px-6 py-3 border-b shrink-0">
-          <div className="font-semibold">編輯每日模板</div>
-          <button onClick={onClose} className="text-gray-500 hover:text-gray-700">✕</button>
-        </div>
-        <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-4">
-          <div className="flex items-center gap-2">
-            <input
-              value={newItem}
-              onChange={(e) => setNewItem(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter') add(); }}
-              placeholder="輸入模板項目，Enter 新增"
-              className="flex-1 border rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-300"
-            />
-            <button onClick={add} className="px-3 py-2 rounded-xl bg-emerald-500 text-white text-sm">新增</button>
-          </div>
-
-          {templates?.length ? (
-            <ul className="space-y-2">
-              {templates.map((t, i) => (
-                <li
-                  key={i}
-                  className="flex items-center gap-2 p-2 rounded-lg border bg-white"
-                  draggable
-                  onDragStart={() => setDragIdx(i)}
-                  onDragOver={(e) => e.preventDefault()}
-                  onDrop={() => { if (dragIdx != null && dragIdx !== i) reorder(dragIdx, i); setDragIdx(null); }}
-                >
-                  <span className="cursor-grab select-none px-1 text-gray-400">⋮⋮</span>
-                  <input className="flex-1 bg-transparent focus:outline-none" value={t} onChange={(e) => update(i, e.target.value)} />
-                  <button onClick={() => del(i)} className="text-xs text-red-600 hover:underline">刪除</button>
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <div className="text-xs text-gray-400">還沒有模板，先新增幾個常用項目吧（例如：喝 2000ml 水、30 分鐘運動、閱讀 20 分鐘⋯⋯）。</div>
-          )}
-        </div>
-        <div className="flex items-center justify-end gap-2 px-4 sm:px-6 py-3 border-t bg-white/95 backdrop-blur sticky bottom-0 shrink-0">
-          <button onClick={onClose} className="px-3 py-2 rounded-xl bg-gray-100 hover:bg-gray-200">取消</button>
-          <button onClick={async () => { await saveTemplates(templates); onClose(); }} className="px-4 py-2 rounded-xl bg-emerald-500 text-white hover:bg-emerald-600">儲存模板</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// －－－－－－－－－－－－－－－－－－－－－－－－－－－－
-// 專案「週看板」：追蹤一件事在本週每天的進度
-// 左欄：本週要做什麼；右側：週一～週日每天可填預計進度，並標記狀態（綠=如期完成、黃=延宕、藍=計畫中）
-// 以週一日期為 key，內容加密後存到 localStorage
-function WeeklyBoardModal({ cryptoKey, onClose }) {
-  const getMonday = (d) => {
-    const x = new Date(d.getFullYear(), d.getMonth(), d.getDate());
-    const day = x.getDay(); // 0=日
-    const diff = (day === 0 ? -6 : 1 - day); // 取得週一
-    x.setDate(x.getDate() + diff);
-    x.setHours(0,0,0,0);
-    return x;
-  };
-  const [weekStart, setWeekStart] = useState(getMonday(new Date()));
-  const days = useMemo(() => Array.from({ length: 7 }, (_, i) => { const d = new Date(weekStart); d.setDate(d.getDate() + i); return d; }), [weekStart]);
-
-  const weekKey = (d) => `${LS_PREFIX}board_${toDateStr(d)}`;
-
-  const [rows, setRows] = useState([]); // 每列：{ id, title, daily: { [YYYY-MM-DD]: { plan:"", status:"plan|done|delay|none" } } }
-  const [loading, setLoading] = useState(true);
-
-  const load = async () => {
-    setLoading(true);
-    const raw = localStorage.getItem(weekKey(weekStart));
-    if (!raw) { setRows([]); setLoading(false); return; }
-    try {
-      const obj = await decryptJSON(JSON.parse(raw), cryptoKey);
-      setRows(Array.isArray(obj.rows) ? obj.rows : []);
-    } catch { setRows([]); }
-    setLoading(false);
-  };
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [cryptoKey, weekStart]);
-
-  const save = async (nextRows) => {
-    const payload = await encryptJSON({ rows: nextRows, savedAt: Date.now() }, cryptoKey);
-    localStorage.setItem(weekKey(weekStart), JSON.stringify(payload));
-  };
-
-  const addRow = () => {
-    const r = { id: Date.now() + Math.random(), title: "", daily: {} };
-    const next = [r, ...rows];
-    setRows(next); save(next);
-  };
-  const delRow = (id) => { const next = rows.filter(r => r.id !== id); setRows(next); save(next); };
-  const updateTitle = (id, v) => { const next = rows.map(r => r.id === id ? { ...r, title: v } : r); setRows(next); save(next); };
-
-  const updateCell = (id, ds, patch) => {
-    const next = rows.map(r => {
-      if (r.id !== id) return r;
-      const cur = r.daily?.[ds] || { plan: "", status: "plan" };
-      return { ...r, daily: { ...r.daily, [ds]: { ...cur, ...patch } } };
-    });
-    setRows(next); save(next);
-  };
-
-  const cycleStatus = (s) => (s === 'plan' ? 'done' : s === 'done' ? 'delay' : s === 'delay' ? 'none' : 'plan');
-  const statusClass = (s) => (
-    s === 'done' ? 'bg-emerald-100 border-emerald-300' :
-    s === 'delay' ? 'bg-amber-100 border-amber-300' :
-    s === 'plan' ? 'bg-sky-50 border-sky-200' : 'bg-white'
-  );
-
-  const prevWeek = () => { const d = new Date(weekStart); d.setDate(d.getDate() - 7); setWeekStart(d); };
-  const nextWeek = () => { const d = new Date(weekStart); d.setDate(d.getDate() + 7); setWeekStart(d); };
-
-  return (
-    <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-end sm:items-center justify-center z-50">
-      <div className="w-full sm:max-w-5xl bg-white rounded-t-2xl sm:rounded-2xl shadow-xl max-h-[92svh] sm:max-h-[92vh] overflow-hidden flex flex-col">
-        <div className="flex items-center justify-between px-4 sm:px-6 py-3 border-b shrink-0">
-          <div className="flex items-center gap-3">
-            <button onClick={prevWeek} className="px-2 py-1 rounded bg-gray-100 hover:bg-gray-200">←</button>
-            <div className="font-semibold">專案週看板：{toDateStr(days[0])} ~ {toDateStr(days[6])}</div>
-            <button onClick={nextWeek} className="px-2 py-1 rounded bg-gray-100 hover:bg-gray-200">→</button>
-          </div>
-          <button onClick={onClose} className="text-gray-500 hover:text-gray-700">✕</button>
-        </div>
-
-        <div className="p-3 text-xs text-gray-600 flex flex-wrap gap-3 border-b">
-          <span className="inline-flex items-center gap-1"><span className="inline-block w-3 h-3 rounded border border-sky-200 bg-sky-50"></span> 計畫</span>
-          <span className="inline-flex items-center gap-1"><span className="inline-block w-3 h-3 rounded border border-emerald-300 bg-emerald-100"></span> 如期完成</span>
-          <span className="inline-flex items-center gap-1"><span className="inline-block w-3 h-3 rounded border border-amber-300 bg-amber-100"></span> 延宕</span>
-          <span className="text-gray-400">點一下格子可循環切換狀態</span>
-        </div>
-
-        <div className="flex-1 overflow-auto p-3">
-          {loading ? (
-            <div className="text-center text-gray-500 py-6">載入中…</div>
-          ) : (
-            <div className="min-w-[800px]">
-              <div className="grid grid-cols-[240px_repeat(7,1fr)] text-sm">
-                {/* 表頭 */}
-                <div className="p-2 bg-gray-50 border">本週要做什麼</div>
-                {days.map((d) => (
-                  <div key={toDateStr(d)} className="p-2 bg-gray-50 border text-center">{toDateStr(d)}</div>
-                ))}
-
-                {/* 資料列 */}
-                {rows.map((r) => (
-                  <React.Fragment key={r.id}>
-                    <div className="border p-2 flex items-center gap-2">
-                      <span className="cursor-grab select-none text-gray-300">⋮⋮</span>
-                      <input
-                        className="flex-1 bg-transparent focus:outline-none"
-                        placeholder="例如：週報、客戶簡報、研究報告…"
-                        value={r.title}
-                        onChange={(e) => updateTitle(r.id, e.target.value)}
-                      />
-                      <button onClick={() => delRow(r.id)} className="text-xs text-red-600 hover:underline">刪除</button>
-                    </div>
-                    {days.map((d) => {
-                      const ds = toDateStr(d);
-                      const cell = r.daily?.[ds] || { plan: "", status: "plan" };
-                      return (
-                        <div key={ds} className={`border p-2 ${statusClass(cell.status)} transition`} onClick={() => updateCell(r.id, ds, { status: cycleStatus(cell.status) })}>
-                          <textarea
-                            className="w-full h-16 resize-none bg-transparent focus:outline-none text-sm"
-                            placeholder="預計進度/交付…（點格子切換狀態）"
-                            value={cell.plan}
-                            onChange={(e) => updateCell(r.id, ds, { plan: e.target.value })}
-                            onClick={(e) => e.stopPropagation()}
-                          />
-                        </div>
-                      );
-                    })}
-                  </React.Fragment>
-                ))}
-              </div>
-
-              {/* 新增列 */}
-              <div className="mt-3">
-                <button onClick={addRow} className="px-3 py-2 rounded-xl bg-gray-800 text-white text-sm">新增一列</button>
-              </div>
-            </div>
-          )}
-        </div>
-
-        <div className="flex items-center justify-end gap-2 px-4 sm:px-6 py-3 border-t bg-white/95 backdrop-blur shrink-0">
-          <button onClick={onClose} className="px-3 py-2 rounded-xl bg-gray-100 hover:bg-gray-200">關閉</button>
-        </div>
-      </div>
-    </div>
-  );
-}
+    ReactDOM.createRoot(document.getElementById("root")).render(<DiaryShell />);
+  </script>
+</body>
+</html>
