@@ -10,19 +10,37 @@
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
     html,body,#root{height:100%}
-    /* 手機鍵盤頂起時，避免彈窗被卡住 */
     @supports(height: 100svh){ .svh90{ max-height:90svh } }
+    /* 錯誤浮層（若有例外會顯示） */
+    #errbox{position:fixed;top:8px;right:8px;z-index:99999;background:#fee2e2;color:#7f1d1d;border:1px solid #fecaca;border-radius:12px;padding:10px 12px;max-width:90vw;white-space:pre-wrap;font-family:ui-monospace, SFMono-Regular, Menlo, monospace;font-size:12px;box-shadow:0 10px 25px rgba(0,0,0,.1)}
   </style>
 </head>
 <body class="bg-pink-50">
   <div id="root"></div>
 
-  <!-- React 18 + Babel Standalone（可直接在瀏覽器編譯） -->
+  <!-- 錯誤攔截：若有例外直接顯示於頁面 -->
+  <script>
+    (function(){
+      function showError(msg,stack){
+        var el=document.getElementById('errbox');
+        if(!el){ el=document.createElement('pre'); el.id='errbox'; document.body.appendChild(el); }
+        el.textContent='⚠️ 發生錯誤：\\n'+msg+(stack?'\\n'+stack:'');
+      }
+      window.addEventListener('error', function(e){ showError(e.message, (e.error&&e.error.stack)||''); });
+      window.addEventListener('unhandledrejection', function(e){
+        var reason=e.reason||{};
+        showError((reason.message)||String(reason), (reason.stack)||'');
+      });
+    })();
+  </script>
+
+  <!-- React 18 UMD + Babel（瀏覽器端編譯 JSX） -->
   <script src="https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@babel/standalone/babel.min.js"></script>
 
-  <script type="text/babel" data-presets="env,react">
+  <!-- 主要程式：避免使用容易引發相容性問題的語法（移除 ?. 與數字底線） -->
+  <script type="text/babel" data-presets="env,react" data-plugins="proposal-optional-chaining,proposal-nullish-coalescing-operator">
     const { useState, useEffect, useMemo, useRef } = React;
 
     // ===== Base64 <-> ArrayBuffer =====
@@ -44,9 +62,8 @@
       return { iv: ab2b64(iv), data: ab2b64(ciphertext) };
     }
     async function decryptJSON(payload, key){
-      const {iv, data} = payload;
-      const ivArr = new Uint8Array(b642ab(iv));
-      const cipherAB = b642ab(data);
+      const ivArr = new Uint8Array(b642ab(payload.iv));
+      const cipherAB = b642ab(payload.data);
       const plaintextAB = await crypto.subtle.decrypt({ name:"AES-GCM", iv:ivArr }, key, cipherAB);
       return JSON.parse(textDecoder.decode(plaintextAB));
     }
@@ -55,25 +72,25 @@
     const LS_PREFIX="moodDiary_";
     const LS_SALT=LS_PREFIX+"salt", LS_VERIFIER=LS_PREFIX+"verifier", LS_TEMPLATES=LS_PREFIX+"templates", LS_CSTICKERS=LS_PREFIX+"cstickers";
 
-    // ===== 日期工具 =====
-    function toDateStr(d){ const y=d.getFullYear(); const m=String(d.getMonth()+1).padStart(2,"0"); const day=String(d.getDate()).padStart(2,"0"); return \`\${y}-\${m}-\${day}\`; }
+    // ===== 日期 =====
+    function toDateStr(d){ const y=d.getFullYear(); const m=String(d.getMonth()+1).padStart(2,"0"); const day=String(d.getDate()).padStart(2,"0"); return y+"-"+m+"-"+day; }
     function getMonthMatrix(y,m){ const first=new Date(y,m,1); const firstDay=first.getDay(); const daysInMonth=new Date(y,m+1,0).getDate(); const cells=[]; for(let i=0;i<firstDay;i++) cells.push(null); for(let d=1; d<=daysInMonth; d++) cells.push(new Date(y,m,d)); while(cells.length%7!==0) cells.push(null); while(cells.length<42) cells.push(null); return cells; }
     function getMonday(d){ const x=new Date(d.getFullYear(), d.getMonth(), d.getDate()); const day=x.getDay(); const diff=(day===0?-6:1-day); x.setDate(x.getDate()+diff); x.setHours(0,0,0,0); return x; }
 
-    // ===== 圖片壓縮（保 PNG 透明） =====
+    // ===== 圖片壓縮 =====
     async function fileToDataURLCompressed(file){
       return new Promise((resolve,reject)=>{
         const reader=new FileReader();
-        reader.onload=()=>{
+        reader.onload=function(){
           const img=new Image();
-          img.onload=()=>{
+          img.onload=function(){
             const canvas=document.createElement("canvas");
-            let {width,height}=img; const max=1600;
+            var width=img.width, height=img.height; const max=1600;
             if(width>height && width>max){ height=Math.round((height*max)/width); width=max; }
             else if(height>max){ width=Math.round((width*max)/height); height=max; }
             canvas.width=width; canvas.height=height;
             const ctx=canvas.getContext("2d"); ctx.drawImage(img,0,0,width,height);
-            const isPng=file.type.includes("png");
+            const isPng = (file.type||"").indexOf("png")>=0;
             const dataUrl=canvas.toDataURL(isPng?"image/png":"image/jpeg", isPng?0.92:0.85);
             resolve(dataUrl);
           };
@@ -83,11 +100,11 @@
       });
     }
 
-    // ===== 其他小工具 =====
+    // ===== 小工具 =====
     const STICKERS=["🐻","🐰","🐱","🌸","🍓","✨","💖","🍰","⭐","😻","🍀","🌈","🎀","🐥","🧸","☁️","🌼"];
     const reorderByIds=(list,fromId,toId)=>{ const a=list.findIndex(x=>x.id===fromId); const b=list.findIndex(x=>x.id===toId); if(a===-1||b===-1||a===b) return list; const copy=[...list]; const [item]=copy.splice(a,1); copy.splice(b,0,item); return copy; };
 
-    // ===== 登入殼層 =====
+    // ===== 表單：設定/解鎖 =====
     function SetPasswordForm({ onSet }){ const [p1,setP1]=useState(""), [p2,setP2]=useState(""), [show,setShow]=useState(false);
       const submit=async(e)=>{ e.preventDefault(); if(p1.length<6) return alert("請至少 6 碼密碼"); if(p1!==p2) return alert("兩次輸入不一致"); await onSet(p1); };
       return (<form onSubmit={submit} className="space-y-4"><div><label className="text-sm text-gray-600">設定密碼</label><input type={show?"text":"password"} className="mt-1 w-full border rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-300" value={p1} onChange={(e)=>setP1(e.target.value)} placeholder="至少 6 碼"/></div><div><label className="text-sm text-gray-600">再次輸入密碼</label><input type={show?"text":"password"} className="mt-1 w-full border rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-300" value={p2} onChange={(e)=>setP2(e.target.value)}/></div><div className="flex items-center gap-2 text-sm"><input id="showPwd" type="checkbox" checked={show} onChange={(e)=>setShow(e.target.checked)} /><label htmlFor="showPwd">顯示密碼</label></div><button className="w-full bg-pink-500 hover:bg-pink-600 text-white rounded-xl py-2 font-semibold">設定並進入</button></form>); }
@@ -106,14 +123,12 @@
               const dateStr=toDateStr(d);
               const isToday=dateStr===todayStr;
               const hasDiary=entryMap.has(d.getDate());
-              const badge = weeklyBadgeMap.get(d.getDate()); // 'plan' | 'done' | 'delay' | undefined
+              const badge = weeklyBadgeMap.get(d.getDate());
               return (
-                <button key={idx} onClick={()=>onPick(d)} className={"relative aspect-square rounded-xl p-2 text-left border hover:shadow transition "+(isToday?"border-pink-400 bg-pink-50":"border-gray-200 bg-white")} title={(hasDiary?"有日記 ":"")+(badge?`週計劃:${badge}`:"")}>
+                <button key={idx} onClick={()=>onPick(d)} className={"relative aspect-square rounded-xl p-2 text-left border hover:shadow transition "+(isToday?"border-pink-400 bg-pink-50":"border-gray-200 bg-white")} title={(hasDiary?"有日記 ":"")+(badge?("週計劃:"+badge):"")}>
                   <div className="flex items-center justify-between">
                     <div className="text-sm font-semibold">{d.getDate()}</div>
-                    {/* 左上角：日記小點（粉） */}
                     {hasDiary && <span className="absolute top-1 left-1 inline-block w-2 h-2 rounded-full bg-pink-500"></span>}
-                    {/* 右下角：週計劃狀態小點 */}
                     {badge && <span className={"absolute bottom-1 right-1 inline-block w-2 h-2 rounded-full "+badgeColor(badge)}></span>}
                   </div>
                 </button>
@@ -160,70 +175,72 @@
     }
 
     // ===== 逾期卡片 =====
-    function OverdueCard({ overdue, carryOne, carryAll }){ if(!overdue?.length) return null; return (
+    function OverdueCard({ overdue, carryOne, carryAll }){ if(!overdue||!overdue.length) return null; return (
       <div className="rounded-2xl shadow bg-white p-4 sm:p-6 mt-4">
         <div className="flex items-center justify-between mb-2">
           <div className="text-lg font-semibold">跨日提醒（最近 7 天未完成）</div>
           <div className="flex items-center gap-2 text-sm">
-            <button onClick={()=>carryAll(true)} className="px-3 py-1.5 rounded-lg bg-emerald-500 text-white hover:bg-emerald-600">全部帶到今天並標記原任務完成</button>
-            <button onClick={()=>carryAll(false)} className="px-3 py-1.5 rounded-lg bg-gray-200 hover:bg-gray-300">全部帶到今天（不標記完成）</button>
+            <button onClick={function(){carryAll(true);}} className="px-3 py-1.5 rounded-lg bg-emerald-500 text-white hover:bg-emerald-600">全部帶到今天並標記原任務完成</button>
+            <button onClick={function(){carryAll(false);}} className="px-3 py-1.5 rounded-lg bg-gray-200 hover:bg-gray-300">全部帶到今天（不標記完成）</button>
           </div>
         </div>
         <ul className="space-y-2">
-          {overdue.map((it,i)=>(
-            <li key={i} className="flex items-center justify-between p-2 rounded-lg border bg-white">
-              <div className="text-sm"><span className="text-gray-500 mr-2">{it.dateStr}</span>{it.text}</div>
-              <div className="flex items-center gap-2 text-xs">
-                <button onClick={()=>carryOne(it,true)} className="px-2 py-1 rounded bg-emerald-100 text-emerald-800 hover:bg-emerald-200">帶到今天+完成原任務</button>
-                <button onClick={()=>carryOne(it,false)} className="px-2 py-1 rounded bg-gray-100 hover:bg-gray-200">只帶到今天</button>
-              </div>
-            </li>
-          ))}
+          {overdue.map(function(it,i){
+            return (
+              <li key={i} className="flex items-center justify-between p-2 rounded-lg border bg-white">
+                <div className="text-sm"><span className="text-gray-500 mr-2">{it.dateStr}</span>{it.text}</div>
+                <div className="flex items-center gap-2 text-xs">
+                  <button onClick={function(){carryOne(it, true);}} className="px-2 py-1 rounded bg-emerald-100 text-emerald-800 hover:bg-emerald-200">帶到今天+完成原任務</button>
+                  <button onClick={function(){carryOne(it, false);}} className="px-2 py-1 rounded bg-gray-100 hover:bg-gray-200">只帶到今天</button>
+                </div>
+              </li>
+            );
+          })}
         </ul>
       </div>
     ); }
 
-    // ===== 週看板（專案）——直接顯示在首頁 =====
+    // ===== 週看板（專案）常駐首頁 =====
     function WeeklyBoardSection({ cryptoKey, onChanged }) {
       const [weekStart, setWeekStart] = useState(getMonday(new Date()));
-      const days = useMemo(()=> Array.from({length:7},(_,i)=>{ const d=new Date(weekStart); d.setDate(d.getDate()+i); return d; }), [weekStart]);
-      const weekKey = (d)=> `${LS_PREFIX}board_${toDateStr(d)}`;
+      const days = useMemo(function(){ return Array.from({length:7},function(_,i){ const d=new Date(weekStart); d.setDate(d.getDate()+i); return d; }); }, [weekStart]);
+      const weekKey = function(d){ return LS_PREFIX + "board_" + toDateStr(d); };
 
       const [rows,setRows]=useState([]); const [loading,setLoading]=useState(true);
 
-      const load = async ()=>{
+      const load = async function(){
         setLoading(true);
         const raw = localStorage.getItem(weekKey(weekStart));
         if(!raw){ setRows([]); setLoading(false); return; }
         try{ const obj = await decryptJSON(JSON.parse(raw), cryptoKey); setRows(Array.isArray(obj.rows)?obj.rows:[]); }
-        catch{ setRows([]); }
+        catch(e){ setRows([]); }
         setLoading(false);
       };
-      useEffect(()=>{ load(); }, [cryptoKey, weekStart]);
+      useEffect(function(){ load(); }, [cryptoKey, weekStart]);
 
-      const save = async (nextRows)=>{
+      const save = async function(nextRows){
         const payload = await encryptJSON({ rows: nextRows, savedAt: Date.now() }, cryptoKey);
         localStorage.setItem(weekKey(weekStart), JSON.stringify(payload));
-        onChanged && onChanged(); // 讓月曆上的顏色點同步更新
+        if(onChanged) onChanged();
       };
 
-      const addRow=()=>{ const r={id:Date.now()+Math.random(), title:"", daily:{}}; const next=[r, ...rows]; setRows(next); save(next); };
-      const delRow=(id)=>{ const next=rows.filter(r=>r.id!==id); setRows(next); save(next); };
-      const updateTitle=(id,v)=>{ const next=rows.map(r=>r.id===id?{...r,title:v}:r); setRows(next); save(next); };
-      const updateCell=(id, ds, patch)=>{
-        const next=rows.map(r=>{
+      const addRow=function(){ const r={id:Date.now()+Math.random(), title:"", daily:{}}; const next=[r, ...rows]; setRows(next); save(next); };
+      const delRow=function(id){ const next=rows.filter(function(r){return r.id!==id;}); setRows(next); save(next); };
+      const updateTitle=function(id,v){ const next=rows.map(function(r){ return r.id===id?{...r,title:v}:r; }); setRows(next); save(next); };
+      const updateCell=function(id, ds, patch){
+        const next=rows.map(function(r){
           if(r.id!==id) return r;
-          const cur=r.daily?.[ds] || {};
-          return { ...r, daily: { ...r.daily, [ds]: { plan:"", status:"plan", ...cur, ...patch } } };
+          const cur=(r.daily && r.daily[ds]) ? r.daily[ds] : {};
+          return { ...r, daily: { ...(r.daily||{}), [ds]: { plan:"", status:"plan", ...cur, ...patch } } };
         });
         setRows(next); save(next);
       };
-      const cycleStatus=(s)=>(s==='plan'?'done': s==='done'?'delay': s==='delay'?'none':'plan');
-      const statusClass=(s)=> s==='done'?'bg-emerald-100 border-emerald-300' : s==='delay'?'bg-amber-100 border-amber-300' : s==='plan'?'bg-sky-50 border-sky-200' : 'bg-white';
+      const cycleStatus=function(s){ return s==='plan'?'done': (s==='done'?'delay': (s==='delay'?'none':'plan')); };
+      const statusClass=function(s){ return s==='done'?'bg-emerald-100 border-emerald-300' : (s==='delay'?'bg-amber-100 border-amber-300' : (s==='plan'?'bg-sky-50 border-sky-200':'bg-white')); };
 
-      const prevWeek=()=>{ const d=new Date(weekStart); d.setDate(d.getDate()-7); setWeekStart(d); };
-      const nextWeek=()=>{ const d=new Date(weekStart); d.setDate(d.getDate()+7); setWeekStart(d); };
-      const goThisWeek=()=> setWeekStart(getMonday(new Date()));
+      const prevWeek=function(){ const d=new Date(weekStart); d.setDate(d.getDate()-7); setWeekStart(d); };
+      const nextWeek=function(){ const d=new Date(weekStart); d.setDate(d.getDate()+7); setWeekStart(d); };
+      const goThisWeek=function(){ setWeekStart(getMonday(new Date())); };
 
       return (
         <div className="bg-white/80 backdrop-blur rounded-2xl shadow p-3 sm:p-4 mt-4">
@@ -248,34 +265,35 @@
               <div className="text-center text-gray-500 py-6">載入中…</div>
             ) : (
               <div style={{ minWidth: 800 }}>
-                {/* 用 inline style 固定欄寬，避免 Tailwind 任意值失效造成左欄消失 */}
                 <div className="grid text-sm" style={{ gridTemplateColumns: '240px repeat(7, minmax(0, 1fr))' }}>
                   <div className="p-2 bg-gray-50 border">本週要做什麼</div>
-                  {days.map((d)=>(<div key={toDateStr(d)} className="p-2 bg-gray-50 border text-center">{toDateStr(d)}</div>))}
+                  {days.map(function(d){ return <div key={toDateStr(d)} className="p-2 bg-gray-50 border text-center">{toDateStr(d)}</div>; })}
 
-                  {rows.map((r)=>(
-                    <React.Fragment key={r.id}>
-                      <div className="border p-2 flex items-center gap-2">
-                        <span className="cursor-grab select-none text-gray-300">⋮⋮</span>
-                        <input className="flex-1 bg-transparent focus:outline-none" placeholder="例如：週報、客戶簡報、研究報告…" value={r.title} onChange={(e)=>updateTitle(r.id, e.target.value)} />
-                        <button onClick={()=>delRow(r.id)} className="text-xs text-red-600 hover:underline">刪除</button>
-                      </div>
-                      {days.map((d)=>{
-                        const ds=toDateStr(d);
-                        const cell=r.daily?.[ds];
-                        const status=cell?.status||null;
-                        return (
-                          <div key={ds} className={"border p-2 "+(statusClass(status||'none'))+" transition"} onClick={()=>updateCell(r.id, ds, { status: cycleStatus(status||'none') })}>
-                            <textarea className="w-full h-16 resize-none bg-transparent focus:outline-none text-sm"
-                              placeholder="預計進度/交付…（點格子切換狀態）"
-                              value={cell?.plan||""}
-                              onChange={(e)=>updateCell(r.id, ds, { plan: e.target.value })}
-                              onClick={(e)=>e.stopPropagation()} />
-                          </div>
-                        );
-                      })}
-                    </React.Fragment>
-                  ))}
+                  {rows.map(function(r){
+                    return (
+                      <React.Fragment key={r.id}>
+                        <div className="border p-2 flex items-center gap-2">
+                          <span className="cursor-grab select-none text-gray-300">⋮⋮</span>
+                          <input className="flex-1 bg-transparent focus:outline-none" placeholder="例如：週報、客戶簡報、研究報告…" value={r.title} onChange={function(e){updateTitle(r.id, e.target.value);}} />
+                          <button onClick={function(){delRow(r.id);}} className="text-xs text-red-600 hover:underline">刪除</button>
+                        </div>
+                        {days.map(function(d){
+                          const ds=toDateStr(d);
+                          const cell=(r.daily && r.daily[ds]) ? r.daily[ds] : null;
+                          const status=cell?cell.status:null;
+                          return (
+                            <div key={ds} className={"border p-2 "+statusClass(status||'none')+" transition"} onClick={function(){updateCell(r.id, ds, { status: cycleStatus(status||'none') });}}>
+                              <textarea className="w-full h-16 resize-none bg-transparent focus:outline-none text-sm"
+                                placeholder="預計進度/交付…（點格子切換狀態）"
+                                value={(cell && cell.plan) ? cell.plan : ""}
+                                onChange={function(e){updateCell(r.id, ds, { plan: e.target.value });}}
+                                onClick={function(e){ e.stopPropagation(); }} />
+                            </div>
+                          );
+                        })}
+                      </React.Fragment>
+                    );
+                  })}
                 </div>
 
                 <div className="mt-3">
@@ -293,31 +311,31 @@
       const dateStr=toDateStr(date);
       const [text,setText]=useState(""), [images,setImages]=useState([]), [stickers,setStickers]=useState([]), [tasks,setTasks]=useState([]), [loading,setLoading]=useState(true), [saving,setSaving]=useState(false), [newTask,setNewTask]=useState(""), [libStickers,setLibStickers]=useState([]);
 
-      useEffect(()=>{ (async()=>{
+      useEffect(function(){ (async function(){
         try{
-          const raw=localStorage.getItem(\`\${LS_PREFIX}\${dateStr}\`);
+          const raw=localStorage.getItem(LS_PREFIX+dateStr);
           if(raw){ const obj=await decryptJSON(JSON.parse(raw), cryptoKey); setText(obj.text||""); setImages(Array.isArray(obj.images)?obj.images:[]); setStickers(Array.isArray(obj.stickers)?obj.stickers:[]); setTasks(Array.isArray(obj.tasks)?obj.tasks:[]); }
-          if(readCustomStickers) setLibStickers(await readCustomStickers());
+          if(readCustomStickers){ const tmp=await readCustomStickers(); setLibStickers(tmp); }
         }catch(e){ console.error(e); alert("讀取資料失敗，可能是密碼變更或資料損毀。"); }
         finally{ setLoading(false); }
       })(); }, [dateStr, cryptoKey]);
 
-      const onAddImages=async(files)=>{ const list=Array.from(files||[]); const converted=[]; for(const f of list) converted.push(await fileToDataURLCompressed(f)); setImages((prev)=>[...converted, ...prev]); };
-      const onSave=async()=>{ try{ setSaving(true); const payload=await encryptJSON({ text, images, stickers, tasks, lastModified:Date.now() }, cryptoKey); localStorage.setItem(\`\${LS_PREFIX}\${dateStr}\`, JSON.stringify(payload)); onClose(); onChanged&&onChanged(); }catch(e){ console.error(e); alert("儲存失敗"); } finally{ setSaving(false);} };
-      const onDelete=()=>{ if(!confirm("刪除此日期的日記與圖片/待辦？")) return; localStorage.removeItem(\`\${LS_PREFIX}\${dateStr}\`); onClose(); onChanged&&onChanged(); };
-      const addStickerEmoji=(s)=>setStickers((prev)=>[s, ...prev]);
-      const removeImage=(idx)=>setImages((prev)=>prev.filter((_,i)=>i!==idx));
-      const removeSticker=(idx)=>setStickers((prev)=>prev.filter((_,i)=>i!==idx));
+      const onAddImages=async function(files){ const list=Array.prototype.slice.call(files||[]); const converted=[]; for(var i=0;i<list.length;i++){ converted.push(await fileToDataURLCompressed(list[i])); } setImages(function(prev){ return converted.concat(prev); }); };
+      const onSave=async function(){ try{ setSaving(true); const payload=await encryptJSON({ text, images, stickers, tasks, lastModified:Date.now() }, cryptoKey); localStorage.setItem(LS_PREFIX+dateStr, JSON.stringify(payload)); onClose(); if(onChanged) onChanged(); }catch(e){ console.error(e); alert("儲存失敗"); } finally{ setSaving(false);} };
+      const onDelete=function(){ if(!confirm("刪除此日期的日記與圖片/待辦？")) return; localStorage.removeItem(LS_PREFIX+dateStr); onClose(); if(onChanged) onChanged(); };
+      const addStickerEmoji=function(s){ setStickers(function(prev){ return [s].concat(prev); }); };
+      const removeImage=function(idx){ setImages(function(prev){ return prev.filter(function(_,i){return i!==idx;}); }); };
+      const removeSticker=function(idx){ setStickers(function(prev){ return prev.filter(function(_,i){return i!==idx;}); }); };
       const [dragId,setDragId]=useState(null);
-      const addTask=()=>{ const t=newTask.trim(); if(!t) return; setTasks((prev)=>[{ id:Date.now()+Math.random(), text:t, done:false }, ...prev]); setNewTask(""); };
-      const toggleTask=(id)=>setTasks((prev)=>prev.map((x)=> (x.id===id?{...x, done:!x.done}:x)));
-      const updateTaskText=(id,text)=>setTasks((prev)=>prev.map((x)=> (x.id===id?{...x, text}:x)));
-      const removeTask=(id)=>setTasks((prev)=>prev.filter((x)=>x.id!==id));
-      const reorderTaskLocal=(from,to)=>setTasks((prev)=>reorderByIds(prev, from, to));
-      const onUploadStickers=async(files)=>{ const list=Array.from(files||[]); const converted=[]; for(const f of list) converted.push(await fileToDataURLCompressed(f)); const newLib=[...converted, ...libStickers]; setLibStickers(newLib); if(writeCustomStickers) await writeCustomStickers(newLib); };
-      const deleteLibSticker=async(idx)=>{ const newLib=libStickers.filter((_,i)=>i!==idx); setLibStickers(newLib); if(writeCustomStickers) await writeCustomStickers(newLib); };
-      const useLibSticker=(src)=>setStickers((prev)=>[src, ...prev]);
-      const renderStickerItem=(s,i)=>{ const isImg=typeof s==='string' && s.startsWith('data:image'); return (<div key={i} className="relative">{isImg?(<img src={s} alt="sticker" className="w-12 h-12 object-contain" />):(<span className="text-3xl leading-none">{s}</span>)}<button onClick={()=>removeSticker(i)} className="absolute -top-2 -right-2 bg-black/60 text-white text-xs rounded-full px-1">✕</button></div>); };
+      const addTask=function(){ const t=(newTask||"").trim(); if(!t) return; setTasks(function(prev){ return [{ id:Date.now()+Math.random(), text:t, done:false }].concat(prev); }); setNewTask(""); };
+      const toggleTask=function(id){ setTasks(function(prev){ return prev.map(function(x){ return x.id===id?{...x, done:!x.done}:x; }); }); };
+      const updateTaskText=function(id,text){ setTasks(function(prev){ return prev.map(function(x){ return x.id===id?{...x, text:text}:x; }); }); };
+      const removeTask=function(id){ setTasks(function(prev){ return prev.filter(function(x){return x.id!==id;}); }); };
+      const reorderTaskLocal=function(from,to){ setTasks(function(prev){ return reorderByIds(prev, from, to); }); };
+      const onUploadStickers=async function(files){ const list=Array.prototype.slice.call(files||[]); const converted=[]; for(var i=0;i<list.length;i++){ converted.push(await fileToDataURLCompressed(list[i])); } const newLib=converted.concat(libStickers); setLibStickers(newLib); if(writeCustomStickers) await writeCustomStickers(newLib); };
+      const deleteLibSticker=async function(idx){ const newLib=libStickers.filter(function(_,i){return i!==idx;}); setLibStickers(newLib); if(writeCustomStickers) await writeCustomStickers(newLib); };
+      const useLibSticker=function(src){ setStickers(function(prev){ return [src].concat(prev); }); };
+      const renderStickerItem=function(s,i){ const isImg=typeof s==='string' && s.indexOf('data:image')===0; return (<div key={i} className="relative">{isImg?(<img src={s} alt="sticker" className="w-12 h-12 object-contain" />):(<span className="text-3xl leading-none">{s}</span>)}<button onClick={function(){removeSticker(i);}} className="absolute -top-2 -right-2 bg-black/60 text-white text-xs rounded-full px-1">✕</button></div>); };
 
       return (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-end sm:items-center justify-center z-50">
@@ -329,10 +347,10 @@
             <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-6">
               {loading?(<div className="text-center text-gray-500">載入中…</div>):(
                 <>
-                  <section><label className="text-sm text-gray-600">文字內容</label><textarea value={text} onChange={(e)=>setText(e.target.value)} rows={6} className="mt-1 w-full border rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-300" placeholder="今天的心情⋯⋯"/></section>
-                  <section className="space-y-2"><div className="flex items-center justify-between"><div className="text-sm text-gray-600">照片</div><label className="px-3 py-1.5 rounded-lg bg-gray-100 text-sm cursor-pointer hover:bg-gray-200">新增照片<input type="file" accept="image/*" multiple className="hidden" onChange={(e)=>onAddImages(e.target.files)} /></label></div>{images.length===0?(<div className="text-xs text-gray-400">尚未加入照片</div>):(<div className="grid grid-cols-3 sm:grid-cols-4 gap-2">{images.map((src,idx)=>(<div key={idx} className="relative group"><img src={src} alt="uploaded" className="w-full h-24 object-cover rounded-lg border" /><button onClick={()=>removeImage(idx)} className="absolute top-1 right-1 bg-black/60 text-white text-xs px-1.5 py-0.5 rounded opacity-0 group-hover:opacity-100">刪除</button></div>))}</div>)}</section>
-                  <section className="space-y-3"><div className="text-sm text-gray-600">可愛貼圖</div><div className="flex flex-wrap gap-2">{STICKERS.map((s)=>(<button key={s} onClick={()=>addStickerEmoji(s)} className="text-2xl hover:scale-110 transition">{s}</button>))}</div><div className="mt-2"><div className="flex items-center justify-between mb-2"><div className="text-sm text-gray-600">自訂貼圖庫（點擊可插入）</div><label className="px-3 py-1.5 rounded-lg bg-gray-100 text-sm cursor-pointer hover:bg-gray-200">上傳貼圖<input type="file" accept="image/*" multiple className="hidden" onChange={async(e)=>e.target.files?.length && (await onUploadStickers(e.target.files))} /></label></div>{libStickers.length?(<div className="grid grid-cols-6 sm:grid-cols-8 gap-2">{libStickers.map((src,idx)=>(<div key={idx} className="relative group"><img src={src} alt="sticker" className="w-12 h-12 object-contain border rounded-lg bg-white cursor-pointer" onClick={()=>useLibSticker(src)} /><button onClick={()=>deleteLibSticker(idx)} className="absolute -top-2 -right-2 bg-black/60 text-white text-[10px] rounded-full px-1 opacity-0 group-hover:opacity-100">✕</button></div>))}</div>):(<div className="text-xs text-gray-400">尚無自訂貼圖，先上傳 PNG/JPG 試試！</div>)}</div>{stickers.length>0 && (<div className="flex flex-wrap gap-2 mt-2">{stickers.map((s,i)=>renderStickerItem(s,i))}</div>)}</section>
-                  <section className="space-y-2"><div className="text-sm text-gray-600">當日事項（可打勾，拖拉排序）</div><div className="flex items-center gap-2"><input value={newTask} onChange={(e)=>setNewTask(e.target.value)} onKeyDown={(e)=>{ if(e.key==='Enter') addTask(); }} placeholder="輸入待辦，Enter 新增" className="flex-1 border rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-300" /><button onClick={addTask} className="px-3 py-2 rounded-xl bg-gray-800 text-white text-sm">新增</button></div>{tasks.length>0?(<ul className="space-y-2">{tasks.map((t)=>(<li key={t.id} className="flex items-center gap-2 p-2 rounded-lg border bg-white" draggable onDragStart={()=>setDragId(t.id)} onDragOver={(e)=>e.preventDefault()} onDrop={()=>{ if(dragId && dragId!==t.id) reorderTaskLocal(dragId, t.id); setDragId(null); }}><span className="cursor-grab select-none px-1 text-gray-400">⋮⋮</span><input type="checkbox" checked={!!t.done} onChange={()=>toggleTask(t.id)} className="w-5 h-5" /><input className={"flex-1 bg-transparent focus:outline-none "+(t.done?"line-through text-gray-400":"")} value={t.text} onChange={(e)=>updateTaskText(t.id, e.target.value)} /><button onClick={()=>removeTask(t.id)} className="text-xs text-red-600 hover:underline">刪除</button></li>))}</ul>):(<div className="text-xs text-gray-400">還沒有事項，先加一個吧！</div>)}</section>
+                  <section><label className="text-sm text-gray-600">文字內容</label><textarea value={text} onChange={function(e){setText(e.target.value);}} rows={6} className="mt-1 w-full border rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-300" placeholder="今天的心情⋯⋯"/></section>
+                  <section className="space-y-2"><div className="flex items-center justify-between"><div className="text-sm text-gray-600">照片</div><label className="px-3 py-1.5 rounded-lg bg-gray-100 text-sm cursor-pointer hover:bg-gray-200">新增照片<input type="file" accept="image/*" multiple className="hidden" onChange={function(e){ if(e.target && e.target.files){ onAddImages(e.target.files); } }} /></label></div>{images.length===0?(<div className="text-xs text-gray-400">尚未加入照片</div>):(<div className="grid grid-cols-3 sm:grid-cols-4 gap-2">{images.map(function(src,idx){ return (<div key={idx} className="relative group"><img src={src} alt="uploaded" className="w-full h-24 object-cover rounded-lg border" /><button onClick={function(){removeImage(idx);}} className="absolute top-1 right-1 bg-black/60 text-white text-xs px-1.5 py-0.5 rounded opacity-0 group-hover:opacity-100">刪除</button></div>); })}</div>)}</section>
+                  <section className="space-y-3"><div className="text-sm text-gray-600">可愛貼圖</div><div className="flex flex-wrap gap-2">{STICKERS.map(function(s){ return (<button key={s} onClick={function(){addStickerEmoji(s);}} className="text-2xl hover:scale-110 transition">{s}</button>); })}</div><div className="mt-2"><div className="flex items-center justify-between mb-2"><div className="text-sm text-gray-600">自訂貼圖庫（點擊可插入）</div><label className="px-3 py-1.5 rounded-lg bg-gray-100 text-sm cursor-pointer hover:bg-gray-200">上傳貼圖<input type="file" accept="image/*" multiple className="hidden" onChange={async function(e){ if(e.target && e.target.files && e.target.files.length){ await onUploadStickers(e.target.files); } }} /></label></div>{libStickers.length?(<div className="grid grid-cols-6 sm:grid-cols-8 gap-2">{libStickers.map(function(src,idx){ return (<div key={idx} className="relative group"><img src={src} alt="sticker" className="w-12 h-12 object-contain border rounded-lg bg-white cursor-pointer" onClick={function(){useLibSticker(src);}} /><button onClick={function(){deleteLibSticker(idx);}} className="absolute -top-2 -right-2 bg-black/60 text-white text-[10px] rounded-full px-1 opacity-0 group-hover:opacity-100">✕</button></div>); })}</div>):(<div className="text-xs text-gray-400">尚無自訂貼圖，先上傳 PNG/JPG 試試！</div>)}</div>{stickers.length>0 && (<div className="flex flex-wrap gap-2 mt-2">{stickers.map(function(s,i){ return renderStickerItem(s,i); })}</div>)}</section>
+                  <section className="space-y-2"><div className="text-sm text-gray-600">當日事項（可打勾，拖拉排序）</div><div className="flex items-center gap-2"><input value={newTask} onChange={function(e){setNewTask(e.target.value);}} onKeyDown={function(e){ if(e.key==='Enter') addTask(); }} placeholder="輸入待辦，Enter 新增" className="flex-1 border rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-300" /><button onClick={addTask} className="px-3 py-2 rounded-xl bg-gray-800 text-white text-sm">新增</button></div>{tasks.length>0?(<ul className="space-y-2">{tasks.map(function(t){ return (<li key={t.id} className="flex items-center gap-2 p-2 rounded-lg border bg-white" draggable onDragStart={function(){ setDragId(t.id); }} onDragOver={function(e){ e.preventDefault(); }} onDrop={function(){ if(dragId && dragId!==t.id) reorderTaskLocal(dragId, t.id); setDragId(null); }}><span className="cursor-grab select-none px-1 text-gray-400">⋮⋮</span><input type="checkbox" checked={!!t.done} onChange={function(){toggleTask(t.id);}} className="w-5 h-5" /><input className={"flex-1 bg-transparent focus:outline-none "+(t.done?"line-through text-gray-400":"")} value={t.text} onChange={function(e){updateTaskText(t.id, e.target.value);}} /><button onClick={function(){removeTask(t.id);}} className="text-xs text-red-600 hover:underline">刪除</button></li>); })}</ul>):(<div className="text-xs text-gray-400">還沒有事項，先加一個吧！</div>)}</section>
                 </>
               )}
             </div>
@@ -351,19 +369,40 @@
     // ===== 模板彈窗 =====
     function TemplateModal({ onClose, templates, setTemplates, saveTemplates }){
       const [newItem,setNewItem]=useState(""), [dragIdx,setDragIdx]=useState(null);
-      const add=()=>{ const t=newItem.trim(); if(!t) return; setTemplates([...templates,t]); setNewItem(""); };
-      const del=(i)=>setTemplates(templates.filter((_,idx)=>idx!==i));
-      const update=(i,v)=>setTemplates(templates.map((x,idx)=>(idx===i?v:x)));
-      const reorder=(from,to)=>{ if(from===to||from==null||to==null) return; const arr=[...templates]; const [item]=arr.splice(from,1); arr.splice(to,0,item); setTemplates(arr); };
+      const add=function(){ const t=(newItem||"").trim(); if(!t) return; setTemplates(templates.concat([t])); setNewItem(""); };
+      const del=function(i){ setTemplates(templates.filter(function(_,idx){ return idx!==i; })); };
+      const update=function(i,v){ setTemplates(templates.map(function(x,idx){ return idx===i?v:x; })); };
+      const reorder=function(from,to){ if(from===to || from==null || to==null) return; const arr=templates.slice(); const item=arr.splice(from,1)[0]; arr.splice(to,0,item); setTemplates(arr); };
       return (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50">
           <div className="w-full sm:max-w-lg bg-white rounded-2xl shadow-xl overflow-hidden flex flex-col svh90" style={{maxHeight:'90vh'}}>
             <div className="flex items-center justify-between px-4 sm:px-6 py-3 border-b shrink-0"><div className="font-semibold">編輯每日模板</div><button onClick={onClose} className="text-gray-500 hover:text-gray-700">✕</button></div>
             <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-4">
-              <div className="flex items-center gap-2"><input value={newItem} onChange={(e)=>setNewItem(e.target.value)} onKeyDown={(e)=>{ if(e.key==='Enter') add(); }} placeholder="輸入模板項目，Enter 新增" className="flex-1 border rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-300" /><button onClick={add} className="px-3 py-2 rounded-xl bg-emerald-500 text-white text-sm">新增</button></div>
-              {templates?.length?(<ul className="space-y-2">{templates.map((t,i)=>(<li key={i} className="flex items-center gap-2 p-2 rounded-lg border bg-white" draggable onDragStart={()=>setDragIdx(i)} onDragOver={(e)=>e.preventDefault()} onDrop={()=>{ if(dragIdx!=null && dragIdx!==i) reorder(dragIdx,i); setDragIdx(null); }}><span className="cursor-grab select-none px-1 text-gray-400">⋮⋮</span><input className="flex-1 bg-transparent focus:outline-none" value={t} onChange={(e)=>update(i, e.target.value)} /><button onClick={()=>del(i)} className="text-xs text-red-600 hover:underline">刪除</button></li>))}</ul>):(<div className="text-xs text-gray-400">還沒有模板，先新增幾個常用項目吧（例如：喝 2000ml 水、30 分鐘運動、閱讀 20 分鐘⋯⋯）。</div>)}
+              <div className="flex items-center gap-2"><input value={newItem} onChange={function(e){setNewItem(e.target.value);}} onKeyDown={function(e){ if(e.key==='Enter') add(); }} placeholder="輸入模板項目，Enter 新增" className="flex-1 border rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-emerald-300" /><button onClick={add} className="px-3 py-2 rounded-xl bg-emerald-500 text白 text-sm" style="color:white">新增</button></div>
+              {templates && templates.length ? (
+                <ul className="space-y-2">
+                  {templates.map(function(t,i){
+                    return (
+                      <li key={i} className="flex items-center gap-2 p-2 rounded-lg border bg白" style="background:white"
+                          draggable
+                          onDragStart={function(){ setDragIdx(i); }}
+                          onDragOver={function(e){ e.preventDefault(); }}
+                          onDrop={function(){ if(dragIdx!=null && dragIdx!==i) reorder(dragIdx,i); setDragIdx(null); }}>
+                        <span className="cursor-grab select-none px-1 text-gray-400">⋮⋮</span>
+                        <input className="flex-1 bg-transparent focus:outline-none" value={t} onChange={function(e){update(i, e.target.value);}} />
+                        <button onClick={function(){del(i);}} className="text-xs text-red-600 hover:underline">刪除</button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              ) : (
+                <div className="text-xs text-gray-400">還沒有模板，先新增幾個常用項目吧（例如：喝 2000ml 水、30 分鐘運動、閱讀 20 分鐘⋯⋯）。</div>
+              )}
             </div>
-            <div className="flex items-center justify-end gap-2 px-4 sm:px-6 py-3 border-t bg-white/95 backdrop-blur sticky bottom-0 shrink-0"><button onClick={onClose} className="px-3 py-2 rounded-xl bg-gray-100 hover:bg-gray-200">取消</button><button onClick={async()=>{ await saveTemplates(templates); onClose(); }} className="px-4 py-2 rounded-xl bg-emerald-500 text-white hover:bg-emerald-600">儲存模板</button></div>
+            <div className="flex items-center justify-end gap-2 px-4 sm:px-6 py-3 border-t bg-white/95 backdrop-blur sticky bottom-0 shrink-0">
+              <button onClick={onClose} className="px-3 py-2 rounded-xl bg-gray-100 hover:bg-gray-200">取消</button>
+              <button onClick={async function(){ await saveTemplates(templates); onClose(); }} className="px-4 py-2 rounded-xl bg-emerald-500 text白 hover:bg-emerald-600" style="color:white">儲存模板</button>
+            </div>
           </div>
         </div>
       );
@@ -372,96 +411,102 @@
     // ===== 主 App =====
     function DiaryApp({ monthDate, setMonthDate, selectedDate, setSelectedDate, cryptoKey, logout, resetAll }){
       const year=monthDate.getFullYear(), month=monthDate.getMonth();
-      const cells=useMemo(()=>getMonthMatrix(year, month), [year, month]);
+      const cells=useMemo(function(){ return getMonthMatrix(year, month); }, [year, month]);
       const [refreshKey,setRefreshKey]=useState(0);
 
       // 本月哪些日子有日記
-      const entryMap=useMemo(()=>{ const map=new Set(); const daysInMonth=new Date(year, month+1, 0).getDate(); for(let d=1; d<=daysInMonth; d++){ const k=\`\${LS_PREFIX}\${year}-\${String(month+1).padStart(2,"0")}-\${String(d).padStart(2,"0")}\`; if(localStorage.getItem(k)) map.add(d); } return map; }, [year, month, selectedDate, refreshKey]);
+      const entryMap=useMemo(function(){ const map=new Set(); const daysInMonth=new Date(year, month+1, 0).getDate(); for(let d=1; d<=daysInMonth; d++){ const k=LS_PREFIX + year + "-" + String(month+1).padStart(2,"0") + "-" + String(d).padStart(2,"0"); if(localStorage.getItem(k)) map.add(d); } return map; }, [year, month, selectedDate, refreshKey]);
 
       const today=new Date(); const todayStr=toDateStr(today);
 
       // 讀寫每日條目（加密）
-      const readEntry=async(dateStr)=>{ const raw=localStorage.getItem(\`\${LS_PREFIX}\${dateStr}\`); if(!raw) return null; const payload=JSON.parse(raw); const obj=await decryptJSON(payload, cryptoKey); if(!Array.isArray(obj.tasks)) obj.tasks=[]; if(!Array.isArray(obj.images)) obj.images=[]; if(!Array.isArray(obj.stickers)) obj.stickers=[]; return obj; };
-      const writeEntry=async(dateStr,obj)=>{ const payload=await encryptJSON(obj, cryptoKey); localStorage.setItem(\`\${LS_PREFIX}\${dateStr}\`, JSON.stringify(payload)); setRefreshKey(v=>v+1); };
+      const readEntry=async function(dateStr){ const raw=localStorage.getItem(LS_PREFIX+dateStr); if(!raw) return null; const payload=JSON.parse(raw); const obj=await decryptJSON(payload, cryptoKey); if(!Array.isArray(obj.tasks)) obj.tasks=[]; if(!Array.isArray(obj.images)) obj.images=[]; if(!Array.isArray(obj.stickers)) obj.stickers=[]; return obj; };
+      const writeEntry=async function(dateStr,obj){ const payload=await encryptJSON(obj, cryptoKey); localStorage.setItem(LS_PREFIX+dateStr, JSON.stringify(payload)); setRefreshKey(function(v){return v+1;}); };
 
-      // 模板 / 自訂貼圖庫（加密）
-      const readTemplates=async()=>{ const raw=localStorage.getItem(LS_TEMPLATES); if(!raw) return []; try{ return await decryptJSON(JSON.parse(raw), cryptoKey); }catch{ return []; } };
-      const writeTemplates=async(arr)=>{ const payload=await encryptJSON(arr, cryptoKey); localStorage.setItem(LS_TEMPLATES, JSON.stringify(payload)); };
-      const readCustomStickers=async()=>{ const raw=localStorage.getItem(LS_CSTICKERS); if(!raw) return []; try{ return await decryptJSON(JSON.parse(raw), cryptoKey); }catch{ return []; } };
-      const writeCustomStickers=async(arr)=>{ const payload=await encryptJSON(arr, cryptoKey); localStorage.setItem(LS_CSTICKERS, JSON.stringify(payload)); };
+      // 模板 / 自訂貼圖庫
+      const readTemplates=async function(){ const raw=localStorage.getItem(LS_TEMPLATES); if(!raw) return []; try{ return await decryptJSON(JSON.parse(raw), cryptoKey); }catch(e){ return []; } };
+      const writeTemplates=async function(arr){ const payload=await encryptJSON(arr, cryptoKey); localStorage.setItem(LS_TEMPLATES, JSON.stringify(payload)); };
+      const readCustomStickers=async function(){ const raw=localStorage.getItem(LS_CSTICKERS); if(!raw) return []; try{ return await decryptJSON(JSON.parse(raw), cryptoKey); }catch(e){ return []; } };
+      const writeCustomStickers=async function(arr){ const payload=await encryptJSON(arr, cryptoKey); localStorage.setItem(LS_CSTICKERS, JSON.stringify(payload)); };
 
       // 匯出/匯入
       const importRef=useRef(null);
-      const exportBackup=()=>{ const data={}; for(const k of Object.keys(localStorage)) if(k.startsWith(LS_PREFIX)) data[k]=localStorage.getItem(k); const blob=new Blob([JSON.stringify({_meta:{when:new Date().toISOString()}, data}, null, 2)], {type:"application/json"}); const url=URL.createObjectURL(blob); const a=document.createElement("a"); a.href=url; a.download=\`mood-diary-backup-\${Date.now()}.json\`; a.click(); URL.revokeObjectURL(url); };
-      const importBackup=async(file)=>{ try{ const text=await file.text(); const parsed=JSON.parse(text); if(!parsed?.data || typeof parsed.data!=="object") throw new Error("格式錯誤"); if(!confirm("匯入將覆蓋現有相同鍵值的資料，繼續嗎？")) return; for(const [k,v] of Object.entries(parsed.data)) localStorage.setItem(k,v); alert("匯入成功。"); setRefreshKey(v=>v+1); refreshToday(); refreshOverdue(); loadTemplates(); setBoardRefreshKey(v=>v+1); }catch(e){ console.error(e); alert("匯入失敗：格式不正確或檔案損毀。"); } };
+      const exportBackup=function(){ const data={}; Object.keys(localStorage).forEach(function(k){ if(k.indexOf(LS_PREFIX)===0) data[k]=localStorage.getItem(k); }); const blob=new Blob([JSON.stringify({_meta:{when:new Date().toISOString()}, data}, null, 2)], {type:"application/json"}); const url=URL.createObjectURL(blob); const a=document.createElement("a"); a.href=url; a.download="mood-diary-backup-"+Date.now()+".json"; a.click(); URL.revokeObjectURL(url); };
+      const importBackup=async function(file){ try{ const text=await file.text(); const parsed=JSON.parse(text); if(!parsed||!parsed.data||typeof parsed.data!=="object") throw new Error("格式錯誤"); if(!confirm("匯入將覆蓋現有相同鍵值的資料，繼續嗎？")) return; for(const k in parsed.data){ localStorage.setItem(k, parsed.data[k]); } alert("匯入成功。"); setRefreshKey(function(v){return v+1;}); refreshToday(); refreshOverdue(); loadTemplates(); setBoardRefreshKey(function(v){return v+1;}); }catch(e){ console.error(e); alert("匯入失敗：格式不正確或檔案損毀。"); } };
 
       // 今天待辦
       const [todayTasks,setTodayTasks]=useState([]); const [newTaskText,setNewTaskText]=useState("");
-      const refreshToday=async()=>{ const obj=await readEntry(todayStr); setTodayTasks(obj?.tasks||[]); };
-      useEffect(()=>{ refreshToday(); }, [cryptoKey]);
-      const mutateToday=async(mutator)=>{ const obj=(await readEntry(todayStr)) || { text:"", images:[], stickers:[], tasks:[], lastModified:Date.now() }; const newObj=mutator({...obj, tasks:Array.isArray(obj.tasks)?obj.tasks:[] }); newObj.lastModified=Date.now(); await writeEntry(todayStr, newObj); setTodayTasks(newObj.tasks); };
-      const addTodayTask=async()=>{ const t=newTaskText.trim(); if(!t) return; await mutateToday(o=>({ ...o, tasks:[{id:Date.now()+Math.random(), text:t, done:false}, ...o.tasks] })); setNewTaskText(""); };
-      const toggleTodayTask=async(id)=>{ await mutateToday(o=>({ ...o, tasks:o.tasks.map(it=> it.id===id?{...it, done:!it.done}:it) })); };
-      const updateTodayTaskText=async(id,text)=>{ await mutateToday(o=>({ ...o, tasks:o.tasks.map(it=> it.id===id?{...it, text}:it) })); };
-      const removeTodayTask=async(id)=>{ await mutateToday(o=>({ ...o, tasks:o.tasks.filter(it=>it.id!==id) })); };
-      const reorderTodayTasks=async(fromId,toId)=>{ await mutateToday(o=>({ ...o, tasks:reorderByIds(o.tasks, fromId, toId) })); };
+      const refreshToday=async function(){ const obj=await readEntry(todayStr); setTodayTasks((obj&&obj.tasks)||[]); };
+      useEffect(function(){ refreshToday(); }, [cryptoKey]);
+      const mutateToday=async function(mutator){ const base=await readEntry(todayStr); const obj = base || { text:"", images:[], stickers:[], tasks:[], lastModified:Date.now() }; const newObj=mutator({ ...obj, tasks:Array.isArray(obj.tasks)?obj.tasks:[] }); newObj.lastModified=Date.now(); await writeEntry(todayStr, newObj); setTodayTasks(newObj.tasks); };
+      const addTodayTask=async function(){ const t=(newTaskText||"").trim(); if(!t) return; await mutateToday(function(o){ return { ...o, tasks:[{id:Date.now()+Math.random(), text:t, done:false}].concat(o.tasks) }; }); setNewTaskText(""); };
+      const toggleTodayTask=async function(id){ await mutateToday(function(o){ return { ...o, tasks:o.tasks.map(function(it){ return it.id===id?{...it, done:!it.done}:it; }) }; }); };
+      const updateTodayTaskText=async function(id,text){ await mutateToday(function(o){ return { ...o, tasks:o.tasks.map(function(it){ return it.id===id?{...it, text:text}:it; }) }; }); };
+      const removeTodayTask=async function(id){ await mutateToday(function(o){ return { ...o, tasks:o.tasks.filter(function(it){return it.id!==id;}) }; }); };
+      const reorderTodayTasks=async function(fromId,toId){ await mutateToday(function(o){ return { ...o, tasks:reorderByIds(o.tasks, fromId, toId) }; }); };
 
-      // 逾期/跨日提醒
+      // 逾期/跨日
       const [overdue,setOverdue]=useState([]);
-      const refreshOverdue=async()=>{ const list=[]; for(let i=1;i<=7;i++){ const d=new Date(today); d.setDate(today.getDate()-i); const ds=toDateStr(d); const o=await readEntry(ds); if(o?.tasks?.length) for(const t of o.tasks) if(!t.done) list.push({ dateStr:ds, id:t.id, text:t.text }); } setOverdue(list); };
-      useEffect(()=>{ refreshOverdue(); }, [cryptoKey, refreshKey]);
-      const carryOneToToday=async(item, alsoComplete=true)=>{ await mutateToday(o=>({ ...o, tasks:[{id:Date.now()+Math.random(), text:item.text, done:false}, ...o.tasks] })); if(alsoComplete){ const src=await readEntry(item.dateStr); if(src){ src.tasks=src.tasks.map(x=> x.id===item.id?{...x, done:true}:x); src.lastModified=Date.now(); await writeEntry(item.dateStr, src); } } refreshOverdue(); };
-      const carryAllOverdue=async(alsoComplete=true)=>{ for(const it of overdue) await carryOneToToday(it, alsoComplete); };
+      const refreshOverdue=async function(){ const list=[]; for(let i=1;i<=7;i++){ const d=new Date(today); d.setDate(today.getDate()-i); const ds=toDateStr(d); const o=await readEntry(ds); if(o && o.tasks && o.tasks.length){ for(let j=0;j<o.tasks.length;j++){ const t=o.tasks[j]; if(!t.done) list.push({ dateStr:ds, id:t.id, text:t.text }); } } } setOverdue(list); };
+      useEffect(function(){ refreshOverdue(); }, [cryptoKey, refreshKey]);
+      const carryOneToToday=async function(item, alsoComplete){ if(typeof alsoComplete==="undefined") alsoComplete=true; await mutateToday(function(o){ return { ...o, tasks:[{id:Date.now()+Math.random(), text:item.text, done:false}].concat(o.tasks) }; }); if(alsoComplete){ const src=await readEntry(item.dateStr); if(src){ src.tasks=src.tasks.map(function(x){ return x.id===item.id?{...x, done:true}:x; }); src.lastModified=Date.now(); await writeEntry(item.dateStr, src); } } refreshOverdue(); };
+      const carryAllOverdue=async function(alsoComplete){ if(typeof alsoComplete==="undefined") alsoComplete=true; for(let i=0;i<overdue.length;i++){ await carryOneToToday(overdue[i], alsoComplete); } };
 
       // 模板
       const [templates,setTemplates]=useState([]); const [templateOpen,setTemplateOpen]=useState(false);
-      const loadTemplates=async()=> setTemplates(await readTemplates());
-      useEffect(()=>{ loadTemplates(); }, [cryptoKey]);
-      const applyTemplatesToToday=async()=>{ if(!templates.length) return alert("目前沒有模板項目，可先到『編輯模板』新增。"); await mutateToday(o=>({ ...o, tasks:[ ...templates.map(t=>({id:Date.now()+Math.random(), text:t, done:false})), ...o.tasks ] })); };
+      const loadTemplates=async function(){ setTemplates(await readTemplates()); };
+      useEffect(function(){ loadTemplates(); }, [cryptoKey]);
+      const applyTemplatesToToday=async function(){ if(!templates.length) { alert("目前沒有模板項目，可先到『編輯模板』新增。"); return; } await mutateToday(function(o){ return { ...o, tasks: templates.map(function(t){ return {id:Date.now()+Math.random(), text:t, done:false}; }).concat(o.tasks) }; }); };
 
-      // ===== 把「週看板」狀態顯示到月曆：右下角顏色點 =====
-      const [weeklyBadgeMap, setWeeklyBadgeMap] = useState(new Map()); // key: day(1~31) -> 'plan'|'done'|'delay'
+      // 週看板狀態顯示到月曆
+      const [weeklyBadgeMap, setWeeklyBadgeMap] = useState(new Map());
       const [boardRefreshKey, setBoardRefreshKey] = useState(0);
-      useEffect(()=>{
-        (async ()=>{
+      useEffect(function(){
+        (async function(){
           const newMap = new Map();
-          // 本月所有日期
           const daysInMonth = new Date(year, month+1, 0).getDate();
-          // 先把當月涉及到的「每個星期一」去重
           const mondayKeys = new Set();
-          for(let d=1; d<=daysInMonth; d++){
-            const date = new Date(year, month, d);
-            mondayKeys.add(toDateStr(getMonday(date)));
-          }
-          // 讀取每個週看板，合併一周內各日的狀態（多列取優先：done > delay > plan）
+          for(let d=1; d<=daysInMonth; d++){ const date = new Date(year, month, d); mondayKeys.add(toDateStr(getMonday(date))); }
           const PRIORITY = { plan:1, delay:2, done:3 };
-          const weekCache = new Map(); // mondayStr -> map(ds -> status)
+          const weekCache = new Map();
+          mondayKeys.forEach(function(monStr){
+            const raw = localStorage.getItem(LS_PREFIX+"board_"+monStr);
+            if(!raw) return;
+            try{
+              const obj = JSON.parse(raw);
+              weekCache.set(monStr, obj);
+            }catch(e){}
+          });
+
+          const mergedByMonday = new Map();
           for(const monStr of mondayKeys){
-            const raw = localStorage.getItem(`${LS_PREFIX}board_${monStr}`);
+            const raw = localStorage.getItem(LS_PREFIX+"board_"+monStr);
             if(!raw) continue;
             try{
               const obj = await decryptJSON(JSON.parse(raw), cryptoKey);
               const rows = Array.isArray(obj.rows)? obj.rows : [];
               const byDay = new Map();
-              for(const r of rows){
-                if(!r?.daily) continue;
-                for(const [ds, cell] of Object.entries(r.daily)){
-                  const s = cell?.status;
+              for(let i=0;i<rows.length;i++){
+                const r = rows[i];
+                if(!r || !r.daily) continue;
+                for(const ds in r.daily){
+                  const cell = r.daily[ds];
+                  const s = cell && cell.status;
                   if(!s) continue;
                   const prev = byDay.get(ds);
                   if(!prev || PRIORITY[s] > PRIORITY[prev]) byDay.set(ds, s);
                 }
               }
-              weekCache.set(monStr, byDay);
-            }catch(e){ /* ignore */ }
+              mergedByMonday.set(monStr, byDay);
+            }catch(e){}
           }
-          // 映射到本月每一天
+
           for(let d=1; d<=daysInMonth; d++){
             const date = new Date(year, month, d);
             const ds = toDateStr(date);
             const monStr = toDateStr(getMonday(date));
-            const byDay = weekCache.get(monStr);
-            const s = byDay?.get(ds);
+            const byDay = mergedByMonday.get(monStr);
+            const s = byDay && byDay.get(ds);
             if(s) newMap.set(d, s);
           }
           setWeeklyBadgeMap(newMap);
@@ -469,14 +514,14 @@
       }, [cryptoKey, year, month, boardRefreshKey]);
 
       // 月曆導覽/打開日記
-      const goPrev = ()=> setMonthDate(new Date(year, month-1, 1));
-      const goNext = ()=> setMonthDate(new Date(year, month+1, 1));
-      const openDay = (d)=> setSelectedDate(d);
-      const openToday = ()=> setSelectedDate(today);
+      const goPrev = function(){ setMonthDate(new Date(year, month-1, 1)); };
+      const goNext = function(){ setMonthDate(new Date(year, month+1, 1)); };
+      const openDay = function(d){ setSelectedDate(d); };
+      const openToday = function(){ setSelectedDate(new Date()); };
 
       // in-app 提醒
-      const inApp = /FBAN|FBAV|Instagram|Line\//i.test(navigator.userAgent || "");
-      const isStandalone = (window?.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || window?.navigator?.standalone;
+      const inApp = /(FBAN|FBAV|Instagram|Line\/)/i.test(navigator.userAgent || "");
+      const isStandalone = (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || (window.navigator && window.navigator.standalone);
 
       return (
         <div className="min-h-screen bg-gradient-to-b from-white to-pink-50 p-4 sm:p-8">
@@ -494,13 +539,13 @@
               </div>
               <div className="flex flex-wrap items-center gap-2">
                 <button onClick={exportBackup} className="px-3 py-2 rounded-xl bg-gray-800 text-white text-sm hover:opacity-90">備份</button>
-                <button onClick={()=>importRef.current?.click()} className="px-3 py-2 rounded-xl bg-gray-200 text-sm hover:opacity-90">匯入</button>
-                <input ref={importRef} type="file" accept="application/json" className="hidden" onChange={(e)=>e.target.files?.[0] && importBackup(e.target.files[0])} />
+                <button onClick={function(){ if(importRef.current) importRef.current.click(); }} className="px-3 py-2 rounded-xl bg-gray-200 text-sm hover:opacity-90">匯入</button>
+                <input ref={importRef} type="file" accept="application/json" className="hidden" onChange={function(e){ if(e && e.target && e.target.files && e.target.files[0]) importBackup(e.target.files[0]); }} />
                 <button onClick={applyTemplatesToToday} className="px-3 py-2 rounded-xl bg-emerald-500 text-white text-sm hover:bg-emerald-600">套用模板到今天</button>
-                <button onClick={()=>setTemplateOpen(true)} className="px-3 py-2 rounded-xl bg-emerald-100 text-emerald-800 text-sm hover:bg-emerald-200">編輯模板</button>
+                <button onClick={function(){ setTemplateOpen(true); }} className="px-3 py-2 rounded-xl bg-emerald-100 text-emerald-800 text-sm hover:bg-emerald-200">編輯模板</button>
                 <button onClick={openToday} className="px-3 py-2 rounded-xl bg-pink-500 text-white text-sm hover:bg-pink-600">今天日記</button>
-                <button onClick={logout} className="px-3 py-2 rounded-xl bg-purple-500 text-white text-sm hover:bg-purple-600">登出</button>
-                <button onClick={resetAll} className="px-3 py-2 rounded-xl bg-red-500 text-white text-sm hover:bg-red-600">重設（清空）</button>
+                <button onClick={logout} className="px-3 py-2 rounded-xl bg-purple-500 text白 text-sm hover:bg-purple-600" style="color:white">登出</button>
+                <button onClick={resetAll} className="px-3 py-2 rounded-xl bg-red-500 text白 text-sm hover:bg-red-600" style="color:white">重設（清空）</button>
               </div>
             </header>
 
@@ -521,10 +566,10 @@
             {/* 逾期/跨日 */}
             <OverdueCard overdue={overdue} carryOne={carryOneToToday} carryAll={carryAllOverdue} />
 
-            {/* 週看板（專案）直接顯示 */}
-            <WeeklyBoardSection cryptoKey={cryptoKey} onChanged={()=>setBoardRefreshKey(v=>v+1)} />
+            {/* 週看板（專案）常駐 */}
+            <WeeklyBoardSection cryptoKey={cryptoKey} onChanged={function(){ setBoardRefreshKey(function(v){return v+1;}); }} />
 
-            {/* 月曆（右下角顯示週看板狀態） */}
+            {/* 月曆 */}
             <div className="bg-white/80 backdrop-blur rounded-2xl shadow p-4 sm:p-6 mt-4">
               <div className="flex items-center justify-between mb-4">
                 <button onClick={goPrev} className="px-3 py-1.5 rounded-lg bg-gray-100 hover:bg-gray-200">← 上個月</button>
@@ -538,8 +583,8 @@
             {selectedDate && (
               <EntryModal
                 date={selectedDate}
-                onClose={()=>setSelectedDate(null)}
-                onChanged={()=>{ if(toDateStr(selectedDate)===todayStr) refreshToday(); setRefreshKey(v=>v+1); refreshOverdue(); }}
+                onClose={function(){ setSelectedDate(null); }}
+                onChanged={function(){ if(toDateStr(selectedDate)===todayStr) refreshToday(); setRefreshKey(function(v){return v+1;}); refreshOverdue(); }}
                 cryptoKey={cryptoKey}
                 readCustomStickers={readCustomStickers}
                 writeCustomStickers={writeCustomStickers}
@@ -547,10 +592,10 @@
             )}
             {templateOpen && (
               <TemplateModal
-                onClose={()=>setTemplateOpen(false)}
+                onClose={function(){ setTemplateOpen(false); }}
                 templates={templates}
                 setTemplates={setTemplates}
-                saveTemplates={async(arr)=>{ await writeTemplates(arr); setTemplates(arr); }}
+                saveTemplates={async function(arr){ await writeTemplates(arr); setTemplates(arr); }}
               />
             )}
 
@@ -570,11 +615,11 @@
       const [selectedDate,setSelectedDate]=useState(null);
       const [hasVerifier,setHasVerifier]=useState(false);
 
-      useEffect(()=>{ setHasVerifier(Boolean(localStorage.getItem(LS_SALT) && localStorage.getItem(LS_VERIFIER))); },[]);
-      const handleSetPassword=async(pwd)=>{ const {key,saltB64}=await deriveKey(pwd,null); const verifierPayload=await encryptJSON({v:"ok"}, key); localStorage.setItem(LS_SALT, saltB64); localStorage.setItem(LS_VERIFIER, JSON.stringify(verifierPayload)); setHasVerifier(true); setCryptoKey(key); setUnlocked(true); };
-      const handleUnlock=async(pwd)=>{ try{ const saltB64=localStorage.getItem(LS_SALT); const {key}=await deriveKey(pwd, saltB64); const verifierPayload=JSON.parse(localStorage.getItem(LS_VERIFIER)); const res=await decryptJSON(verifierPayload, key); if(res?.v==="ok"){ setCryptoKey(key); setUnlocked(true); } else alert("密碼錯誤"); }catch(e){ console.error(e); alert("密碼錯誤或資料已損毀。"); } };
-      const logout=()=>{ setUnlocked(false); setCryptoKey(null); };
-      const resetAll=()=>{ if(!confirm("⚠️ 將清空所有日記資料與密碼設定，且無法復原。確定嗎？")) return; Object.keys(localStorage).filter(k=>k.startsWith(LS_PREFIX)).forEach(k=>localStorage.removeItem(k)); setUnlocked(false); setCryptoKey(null); alert("已清空。重新整理後可重新設定密碼。"); };
+      useEffect(function(){ setHasVerifier(Boolean(localStorage.getItem(LS_SALT) && localStorage.getItem(LS_VERIFIER))); },[]);
+      const handleSetPassword=async function(pwd){ const obj=await deriveKey(pwd,null); const key=obj.key, saltB64=obj.saltB64; const verifierPayload=await encryptJSON({v:"ok"}, key); localStorage.setItem(LS_SALT, saltB64); localStorage.setItem(LS_VERIFIER, JSON.stringify(verifierPayload)); setHasVerifier(true); setCryptoKey(key); setUnlocked(true); };
+      const handleUnlock=async function(pwd){ try{ const saltB64=localStorage.getItem(LS_SALT); const key=(await deriveKey(pwd, saltB64)).key; const verifierPayload=JSON.parse(localStorage.getItem(LS_VERIFIER)); const res=await decryptJSON(verifierPayload, key); if(res && res.v==="ok"){ setCryptoKey(key); setUnlocked(true); } else alert("密碼錯誤"); }catch(e){ console.error(e); alert("密碼錯誤或資料已損毀。"); } };
+      const logout=function(){ setUnlocked(false); setCryptoKey(null); };
+      const resetAll=function(){ if(!confirm("⚠️ 將清空所有日記資料與密碼設定，且無法復原。確定嗎？")) return; Object.keys(localStorage).filter(function(k){return k.indexOf(LS_PREFIX)===0;}).forEach(function(k){ localStorage.removeItem(k); }); setUnlocked(false); setCryptoKey(null); alert("已清空。重新整理後可重新設定密碼。"); };
 
       if(!unlocked){
         return (
